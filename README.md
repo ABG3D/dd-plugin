@@ -6,6 +6,7 @@ Klipper plugin for the **Dragons Den** automated hotend changer (v0.0.1).
 - `DRAGONS_CALIBRATE_DOCKS`: guided dock location calibration (fixed or floating gantry)
 - `DRAGONS_CALIBRATE_OFFSETS`: guided tool offset calibration with an **eddy** probe, a **sexball** (calibration ball) or a **USB camera**
 - Wizards run as native Klipper action prompts, so they work in **Mainsail and Fluidd** with no frontend changes
+- A **Dragons Den** entry in Mainsail's left sidebar opens a control panel for settings, calibration, tool changes and the USB camera view
 - Dock coordinates, tool offsets and the active tool persist in `dragonsnest.cfg` across restarts
 
 > **Status:** v0.0.1 has been tested against mocked Klipper objects only (`tests/`), not on a printer yet. Run the first tool changes slowly and keep a hand near the power switch.
@@ -15,8 +16,11 @@ Klipper plugin for the **Dragons Den** automated hotend changer (v0.0.1).
 ```
 klippy/extras/dragons_den.py           Klipper module ([dragons_den])
 config/dragonsnest.cfg                 Config template + persisted state
-moonraker/dragons_den.py               Moonraker component (camera alignment page)
-moonraker/dragons_den_camera.html      Camera page: live feed, crosshair, jog, Save
+moonraker/dragons_den.py               Moonraker component (serves the pages below)
+moonraker/dragons_den_panel.html       Dragons Den control panel (Mainsail sidebar)
+moonraker/dragons_den_camera.html      Standalone camera page: live feed, crosshair, jog, Save
+mainsail/navi.json, mainsail/custom.css  Mainsail sidebar entry and its styling
+scripts/theme_install.py               Merges the sidebar entry into <config>/.theme/
 install.sh                             Symlink installer
 tests/                                 pytest suite with Klipper mocks
 ```
@@ -59,9 +63,10 @@ The installer:
 - symlinks the Moonraker component into `~/moonraker/moonraker/components/`
 - adds both symlinks to the Klipper and Moonraker `.git/info/exclude` files so `update_manager` doesn't report those repos as dirty
 - copies `config/dragonsnest.cfg` into `~/printer_data/config/`, but only if that file doesn't exist yet. It is copied, not linked, because the plugin writes to it.
+- adds the **Dragons Den** sidebar entry to Mainsail by merging into `~/printer_data/config/.theme/navi.json` and `custom.css`. Your own entries and styles are kept: the Dragons Den link is matched by its URL, and its CSS sits between `dragons_den` marker comments, so re-running the installer replaces it instead of duplicating it. An invalid existing `navi.json` is left untouched and reported.
 - restarts `klipper` and `moonraker`
 
-Options: `-k <klipper dir>`, `-m <moonraker dir>`, `-c <config dir>`, `-n` (don't restart), `-u` (uninstall).
+Options: `-k <klipper dir>`, `-m <moonraker dir>`, `-c <config dir>`, `-n` (don't restart), `-s` (skip the Mainsail sidebar entry), `-u` (uninstall: removes the symlinks and the sidebar entry, keeps `dragonsnest.cfg`).
 
 ### 2. printer.cfg
 
@@ -87,7 +92,8 @@ If you already have `T0`, `T1`, ... macros, remove them or set `register_t_comma
 ### 3. moonraker.conf
 
 ```ini
-# Serves the USB camera alignment page at /server/dragons_den/camera
+# Serves the control panel (/server/dragons_den/panel) and the
+# USB camera alignment page (/server/dragons_den/camera)
 [dragons_den]
 
 [update_manager dragons_den]
@@ -100,7 +106,29 @@ managed_services: klipper moonraker
 
 Restart Moonraker. Updates then appear in Mainsail/Fluidd under *Machine → Update Manager*.
 
-The camera page polls Klipper through Moonraker's API. If Moonraker requires authentication, your network must be listed under `trusted_clients` in `[authorization]`.
+The panel and camera pages talk to Klipper through Moonraker's API. If Moonraker requires authentication, your network must be listed under `trusted_clients` in `[authorization]`.
+
+### 4. Open the Dragons Den panel
+
+Reload Mainsail in the browser. A **Dragons Den** item with a nozzle icon appears in the left sidebar; it opens the control panel at `http://<printer>/server/dragons_den/panel` (the **← Mainsail** button returns to the dashboard). Mainsail loads `navi.json` and `custom.css` from `.theme`, but it does not run custom JavaScript, so the panel is its own page served by Moonraker rather than a view inside Mainsail.
+
+Fluidd has no sidebar extension mechanism. Open the panel URL directly, or use the same wizards there through Klipper's action prompts.
+
+## Dragons Den panel
+
+The panel polls Klipper once a second and sends every action as a G-code command, so everything it does is also available from the console.
+
+| Card | Controls |
+|---|---|
+| **Wizard** (while one runs) | Mirrors the open action prompt: instructions, jog buttons, Accept/OK/Save, Cancel |
+| **Paper Z-Test (TESTZ)** (while Klipper's manual probe is active) | Current Z, `TESTZ` −1/−0.1/−0.05/−0.01 and +0.01/+0.05/+0.1/+1, Accept, Abort |
+| **Tool Control & Status** | `T0`..`Tn` quick select, Dock Active Tool, Home All, active tool, homed axes, position, dock and offset table, set the attached tool without motion |
+| **Dock Calibration** | Calibrate All Docks, Calibrate T0..Tn (one tool each), Test Slow Dock; shows the front-dock limit and `+Y` clearance |
+| **Offset Calibration** | Calibrate Offsets and Paper Z-Test for the selected tool; USB camera live view with centered crosshair and Z-focus circle, fine jog 0.01 / 0.05 / 0.1 / 1.0 mm, Save |
+| **Settings & Persistence** | `tool_count`, `kinematics_type`, `dock_x_travel`, `lock_retract_dist`, `clear_y_dist`, `probe_type`, `ball_od`, `front_dock_max_y`, and **Save to dragonsnest.cfg** |
+| **Console** | Recent G-code responses |
+
+**Saving settings** writes the values into the `[dragons_den]` section of `dragonsnest.cfg` (`DRAGONS_SAVE_SETTINGS`). Existing lines are replaced, commented-out options are uncommented in place, comments and the state block are kept. Klipper reads its config only at startup, so the panel then shows a **Restart Klipper** button. The settings must live in `dragonsnest.cfg`; if you moved `[dragons_den]` into `printer.cfg`, edit them there instead.
 
 ## Configuration reference
 
@@ -128,6 +156,7 @@ The camera page polls Klipper through Moonraker's API. If Moonraker requires aut
 | `camera_position` | (none) | usb_camera: estimated `x, y, z` with T0 over the lens |
 | `camera_url` | `/webcam/?action=stream` | usb_camera: MJPEG stream shown on the alignment page |
 | `camera_circle_px` | `60` | usb_camera: default focus circle radius (stream pixels) |
+| `paper_test_point` | bed center | Bed spot `x, y` for `DRAGONS_PAPER_TEST` |
 | `nest_file` | next to `printer.cfg` | Path of `dragonsnest.cfg` |
 
 ## Persistence (`dragonsnest.cfg`)
@@ -180,12 +209,14 @@ Run without arguments to pick a tool, or use `DRAGONS_CALIBRATE_OFFSETS TOOL=n`.
 
 **usb_camera**
 1. Mount an upward-facing USB camera (crowsnest) and set `camera_position` and `camera_url`.
-2. Open `http://<printer>/server/dragons_den/camera`. Or add it in Mainsail as a webcam with service **HTML/iframe** so it shows on the dashboard.
+2. Open the **Dragons Den** panel from Mainsail's sidebar (the live view is in its Offset Calibration card), or the standalone page `http://<printer>/server/dragons_den/camera`. The standalone page can also be added in Mainsail as a webcam with service **HTML/iframe** so it shows on the dashboard.
 3. Pick the tool and press **Start calibration**. The nozzle moves over the camera.
 4. Use the 0.01 / 0.05 / 0.1 / 1.0 mm jog buttons under the feed to center the nozzle on the crosshair, and use Z to focus it to the reference circle (the slider adjusts the circle size).
 5. Press **Save**. The plugin computes the offset from T0 and writes it to `dragonsnest.cfg`.
 
 The printer prompt shows the same jog and Save controls if you'd rather stay in Mainsail/Fluidd.
+
+**Paper Z-Test (`DRAGONS_PAPER_TEST`)** measures only a tool's Z offset, with Klipper's manual probe at `paper_test_point`. Run it for T0 first; that result is the Z reference. Each later tool then gets `offset_z = z(Ti) - z(T0)`, while its X/Y offsets stay as they were. Every nozzle tests the same bed spot, because the tool's XY offset is applied when moving there.
 
 ## G-code commands
 
@@ -195,9 +226,12 @@ The printer prompt shows the same jog and Save controls if you'd rather stay in 
 | `DRAGONS_SELECT_TOOL TOOL=n` | Change tool; `TOOL=-1` parks the active tool |
 | `DRAGONS_SET_ACTIVE_TOOL TOOL=n` | Tell the plugin which tool is attached (no motion; `-1` = none) |
 | `DRAGONS_SET_OFFSET TOOL=n [X=] [Y=] [Z=]` | Set an offset by hand |
-| `DRAGONS_CALIBRATE_DOCKS [TOOL=n]` | Dock calibration wizard |
+| `DRAGONS_CALIBRATE_DOCKS [TOOL=n] [SINGLE=1]` | Dock calibration wizard; `SINGLE=1` calibrates only `TOOL` |
+| `DRAGONS_TEST_DOCK` | Slowly dock the active tool (`verify_speed`, front dock, `+Y` clearance) |
 | `DRAGONS_CALIBRATE_OFFSETS [TOOL=n]` | Offset calibration wizard |
+| `DRAGONS_PAPER_TEST [TOOL=n]` | Z-only offset by manual paper test (T0 first) |
 | `DRAGONS_CAMERA_SAVE` | Save during usb_camera calibration |
+| `DRAGONS_SAVE_SETTINGS [TOOL_COUNT=] [KINEMATICS_TYPE=] [PROBE_TYPE=] [DOCK_X_TRAVEL=] [LOCK_RETRACT_DIST=] [CLEAR_Y_DIST=] [BALL_OD=] [FRONT_DOCK_MAX_Y=]` | Write settings to `dragonsnest.cfg` (restart to apply; `FRONT_DOCK_MAX_Y=none` unsets) |
 | `DRAGONS_JOG [X=] [Y=] [Z=]` / `DRAGONS_JOG_STEP STEP=` | Wizard jogging |
 | `DRAGONS_STATUS` | Print docks, offsets and active tool |
 | `DRAGONS_ABORT` | Close the running wizard |
@@ -214,7 +248,14 @@ python3 -m pip install pytest
 python3 -m pytest
 ```
 
-The tests mock Klipper's `printer`, `gcode`, `toolhead` (with step-counting steppers) and `reactor`. They cover fixed and floating gantry dock calibration, all three offset modes, tool change kinematics and `dragonsnest.cfg` persistence.
+The tests mock Klipper's `printer`, `gcode`, `toolhead` (with step-counting steppers) and `reactor`. They cover:
+- fixed and floating gantry dock calibration, the front-dock limit and `+Y` clearance
+- all three offset modes and the paper Z-test
+- tool change kinematics and test docking
+- `dragonsnest.cfg` persistence and settings saving
+- the panel's prompt mirroring
+- the Mainsail sidebar merge and `install.sh`
+- the Moonraker component
 
 ## License
 

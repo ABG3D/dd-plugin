@@ -3,12 +3,15 @@
 #
 # Symlinks the Klipper module and the Moonraker component from this repository
 # into Klipper and Moonraker, copies the dragonsnest.cfg template into the
-# printer config folder (only if none exists yet), and restarts the services.
+# printer config folder (only if none exists yet), adds the "Dragons Den"
+# entry to Mainsail's sidebar (<config>/.theme/navi.json + custom.css, merged
+# with any existing content), and restarts the services.
 #
 # Usage: ./install.sh [-k klipper_dir] [-m moonraker_dir] [-c config_dir]
-#                     [-n] [-u]
+#                     [-n] [-s] [-u]
 #   -n  do not restart services
-#   -u  uninstall (remove the symlinks; dragonsnest.cfg is kept)
+#   -s  skip the Mainsail sidebar entry
+#   -u  uninstall (remove symlinks and sidebar entry; dragonsnest.cfg is kept)
 set -euo pipefail
 
 SRCDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -17,18 +20,20 @@ MOONRAKER_PATH="${MOONRAKER_PATH:-$HOME/moonraker}"
 CONFIG_PATH="${CONFIG_PATH:-$HOME/printer_data/config}"
 RESTART=1
 UNINSTALL=0
+THEME=1
 
 usage() {
-    sed -n '2,13p' "$0" | sed 's/^# \{0,1\}//'
+    sed -n '2,16p' "$0" | sed 's/^# \{0,1\}//'
     exit 1
 }
 
-while getopts "k:m:c:nuh" opt; do
+while getopts "k:m:c:nsuh" opt; do
     case "$opt" in
         k) KLIPPER_PATH="$OPTARG" ;;
         m) MOONRAKER_PATH="$OPTARG" ;;
         c) CONFIG_PATH="$OPTARG" ;;
         n) RESTART=0 ;;
+        s) THEME=0 ;;
         u) UNINSTALL=1 ;;
         *) usage ;;
     esac
@@ -57,6 +62,23 @@ link_file() {
     echo "Linked $dst -> $src"
 }
 
+THEME_DIR="$CONFIG_PATH/.theme"
+
+# Mainsail sidebar entry: merged into existing navi.json / custom.css.
+theme() {
+    local action="$1"
+    [ "$THEME" -eq 1 ] || return 0
+    if [ "$action" = install ] && [ ! -d "$CONFIG_PATH" ]; then
+        echo "Config folder $CONFIG_PATH not found; skipping the Mainsail sidebar entry."
+        return 0
+    fi
+    if python3 "$SRCDIR/scripts/theme_install.py" "$action" "$THEME_DIR" "$SRCDIR/mainsail"; then
+        echo "Mainsail sidebar entry: ${action}ed in $THEME_DIR (reload Mainsail to see it)"
+    else
+        echo "Mainsail sidebar entry not ${action}ed; see the message above." >&2
+    fi
+}
+
 restart_services() {
     [ "$RESTART" -eq 1 ] || return 0
     if command -v systemctl >/dev/null 2>&1; then
@@ -68,6 +90,7 @@ restart_services() {
 
 if [ "$UNINSTALL" -eq 1 ]; then
     rm -f "$KLIPPER_LINK" "$MOONRAKER_LINK"
+    theme uninstall
     echo "Removed Dragons Den symlinks. $CONFIG_PATH/dragonsnest.cfg was kept."
     restart_services
     exit 0
@@ -100,6 +123,8 @@ if [ -d "$CONFIG_PATH" ]; then
 else
     echo "Config folder $CONFIG_PATH not found; copy config/dragonsnest.cfg yourself (use -c)."
 fi
+
+theme install
 
 restart_services
 echo "Dragons Den installed. Add [include dragonsnest.cfg] to printer.cfg."

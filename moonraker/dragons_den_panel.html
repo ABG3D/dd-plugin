@@ -1,0 +1,434 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dragons Den</title>
+<style>
+  /* Colors follow Mainsail's dark theme */
+  :root { color-scheme: dark; --bg: #121212; --bar: #1e1e1e; --card: #1e1e1e; --card-head: #2a2a2b;
+          --line: #333; --text: #ffffffde; --muted: #ffffff99; --primary: #2196f3; --ok: #4caf50;
+          --warn: #fb8c00; --err: #ff5252; --info: #26a69a; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 Roboto, system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  a { color: var(--primary); }
+  header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+           padding: 10px 16px; background: var(--bar); border-bottom: 1px solid var(--line); }
+  header h1 { margin: 0; font-size: 18px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+  header svg { width: 22px; height: 22px; fill: var(--primary); }
+  .back { text-decoration: none; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); }
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
+  .chip { padding: 2px 10px; border-radius: 12px; background: #333; font-size: 12px; }
+  .chip.ok { background: #1b5e20; } .chip.bad { background: #7f1d1d; } .chip.busy { background: #0d47a1; }
+  main { display: grid; gap: 16px; padding: 16px; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); align-items: start; }
+  .card { background: var(--card); border-radius: 6px; overflow: hidden; box-shadow: 0 2px 4px #0006; }
+  .card > h2 { margin: 0; padding: 10px 14px; font-size: 15px; font-weight: 500; background: var(--card-head); }
+  .card > .body { padding: 12px 14px; }
+  .card.wide { grid-column: 1 / -1; }
+  .card.attention > h2 { background: #0d47a1; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
+  .hint { color: var(--muted); font-size: 12px; }
+  button { background: #333; color: var(--text); border: 0; border-radius: 4px; padding: 7px 12px;
+           font: inherit; font-weight: 500; letter-spacing: .02em; cursor: pointer; text-transform: uppercase; font-size: 12px; }
+  button:hover:not(:disabled) { filter: brightness(1.25); }
+  button:disabled { opacity: .45; cursor: default; }
+  button.primary { background: var(--primary); } button.ok { background: var(--ok); }
+  button.warning { background: var(--warn); } button.error { background: var(--err); }
+  button.info { background: var(--info); } button.secondary { background: #444; }
+  button.on { outline: 2px solid var(--primary); }
+  table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
+  th { color: var(--muted); font-weight: 500; }
+  label.field { display: grid; grid-template-columns: 150px 1fr; gap: 8px; align-items: center; margin: 6px 0; }
+  input, select { background: #2a2a2b; color: var(--text); border: 1px solid #444; border-radius: 4px; padding: 6px 8px; font: inherit; width: 100%; }
+  .view { position: relative; background: #000; border-radius: 4px; overflow: hidden; aspect-ratio: 4 / 3; }
+  .view img, .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .pad { display: grid; grid-template-columns: repeat(3, 58px); gap: 6px; }
+  .zcol { display: grid; gap: 6px; margin-left: 12px; }
+  #prompt-items p { margin: 6px 0; }
+  #console { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; max-height: 220px; overflow: auto; color: var(--muted); }
+  #toast { position: fixed; bottom: 16px; right: 16px; max-width: 520px; padding: 10px 14px; border-radius: 4px;
+           background: var(--err); display: none; white-space: pre-wrap; z-index: 3; }
+  .hidden { display: none !important; }
+  .banner { background: #4a3000; border-left: 4px solid var(--warn); padding: 8px 10px; border-radius: 4px; }
+</style>
+</head>
+<body>
+<header>
+  <a class="back" href="/">&larr; Mainsail</a>
+  <h1><svg viewBox="0 0 24 24"><path d="M7,2H17V8H19V13H16.5L13,17H11L7.5,13H5V8H7V2M10,22H2V20H10A1,1 0 0,0 11,19V18H13V19A3,3 0 0,1 10,22Z"/></svg>Dragons Den</h1>
+  <div class="chips">
+    <span class="chip" id="chip-klippy">Klipper: ?</span>
+    <span class="chip" id="chip-tool">Tool: ?</span>
+    <span class="chip" id="chip-homed">Homed: ?</span>
+    <span class="chip hidden busy" id="chip-busy">Running…</span>
+  </div>
+</header>
+
+<main>
+  <!-- Wizard prompt mirror: shown while a Dragons Den wizard is waiting -->
+  <section class="card wide attention hidden" id="card-prompt">
+    <h2 id="prompt-title">Wizard</h2>
+    <div class="body">
+      <div id="prompt-items"></div>
+      <div class="row" id="prompt-footer"></div>
+    </div>
+  </section>
+
+  <!-- Klipper manual probe (paper test / sexball Z) -->
+  <section class="card wide attention hidden" id="card-probe">
+    <h2>Paper Z-Test (TESTZ)</h2>
+    <div class="body">
+      <div class="row">Z = <b id="probe-z">?</b> <span class="hint" id="probe-range"></span></div>
+      <div class="row" id="testz-down"></div>
+      <div class="row" id="testz-up"></div>
+      <div class="row">
+        <button class="ok" data-gcode="ACCEPT">Accept</button>
+        <button class="error" data-gcode="ABORT">Abort</button>
+      </div>
+      <div class="hint">Lower the nozzle until a sheet of paper just drags, then Accept.</div>
+    </div>
+  </section>
+
+  <section class="card" id="card-tools">
+    <h2>Tool Control &amp; Status</h2>
+    <div class="body">
+      <div class="banner hidden" id="restart-banner">
+        Settings saved to dragonsnest.cfg. Restart Klipper to apply them.
+        <button class="warning" data-gcode="RESTART">Restart Klipper</button>
+      </div>
+      <div class="row" id="tool-buttons"></div>
+      <div class="row">
+        <button class="secondary" data-gcode="DRAGONS_SELECT_TOOL TOOL=-1">Dock Active Tool</button>
+        <button class="secondary" data-gcode="G28">Home All</button>
+        <button class="secondary" data-gcode="DRAGONS_STATUS">Report Status</button>
+      </div>
+      <div class="row hint" id="position">Position: ?</div>
+      <table>
+        <thead><tr><th>Tool</th><th>Dock X / Y / Z</th><th>Offset X / Y / Z</th></tr></thead>
+        <tbody id="tool-table"></tbody>
+      </table>
+      <div class="row">
+        <span class="hint">Attached tool (no motion):</span>
+        <select id="set-active" style="width:auto"></select>
+        <button class="secondary" id="set-active-btn">Set</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="card-docks">
+    <h2>Dock Calibration</h2>
+    <div class="body">
+      <div class="hint">Docks are on the front dock bar (low Y). The toolhead enters a dock moving &minus;Y and
+        pulls out moving +Y by clear_y_dist. Rear dock positions are rejected.</div>
+      <div class="row">
+        <button class="primary" data-gcode="DRAGONS_CALIBRATE_DOCKS">Calibrate All Docks</button>
+        <button class="warning" data-gcode="DRAGONS_TEST_DOCK">Test Slow Dock</button>
+      </div>
+      <div class="row" id="dock-buttons"></div>
+      <div class="hint" id="dock-limit"></div>
+    </div>
+  </section>
+
+  <section class="card" id="card-offsets">
+    <h2>Offset Calibration</h2>
+    <div class="body">
+      <div class="row">
+        <span class="hint">Probe: <b id="probe-type">?</b></span>
+        <select id="offset-tool" style="width:auto"></select>
+        <button class="primary" id="cal-offsets">Calibrate Offsets</button>
+        <button class="info" id="paper-test">Paper Z-Test</button>
+      </div>
+      <div class="hint">T0 is the reference (0,0,0); calibrate it first. Paper Z-Test measures Z only and keeps X/Y.</div>
+      <div class="view" style="margin-top:10px">
+        <img id="stream" alt="USB camera">
+        <canvas id="overlay"></canvas>
+      </div>
+      <div class="row"><span class="hint">Jog step (mm)</span><span id="steps"></span></div>
+      <div class="row">
+        <div class="pad">
+          <span></span><button data-jog="Y" data-dir="1">Y+</button><span></span>
+          <button data-jog="X" data-dir="-1">X−</button><span></span><button data-jog="X" data-dir="1">X+</button>
+          <span></span><button data-jog="Y" data-dir="-1">Y−</button><span></span>
+        </div>
+        <div class="zcol">
+          <button data-jog="Z" data-dir="1">Z+ away</button>
+          <button data-jog="Z" data-dir="-1">Z− closer</button>
+        </div>
+      </div>
+      <div class="row">
+        <span class="hint">Focus circle</span>
+        <input type="range" id="radius" min="5" max="300" value="60" style="width:200px">
+        <span class="hint" id="radius-val"></span>
+        <button class="ok" id="camera-save" disabled>Save</button>
+      </div>
+    </div>
+  </section>
+
+  <section class="card" id="card-settings">
+    <h2>Settings &amp; Persistence</h2>
+    <div class="body">
+      <form id="settings">
+        <label class="field">tool_count <input name="tool_count" type="number" min="1" max="32" step="1"></label>
+        <label class="field">kinematics_type
+          <select name="kinematics_type"><option>fixed_gantry</option><option>floating_gantry</option></select></label>
+        <label class="field">dock_x_travel <input name="dock_x_travel" type="number" step="0.1"></label>
+        <label class="field">lock_retract_dist <input name="lock_retract_dist" type="number" step="0.1" min="0"></label>
+        <label class="field">clear_y_dist <input name="clear_y_dist" type="number" step="0.5" min="0.5"></label>
+        <label class="field">probe_type
+          <select name="probe_type"><option>eddy</option><option>sexball</option><option>usb_camera</option></select></label>
+        <label class="field">ball_od <input name="ball_od" type="number" step="0.01" min="0"></label>
+        <label class="field">front_dock_max_y <input name="front_dock_max_y" type="number" step="0.5" placeholder="middle of Y"></label>
+        <div class="row">
+          <button class="primary" type="submit">Save to dragonsnest.cfg</button>
+          <button class="secondary" type="button" id="settings-reset">Revert</button>
+        </div>
+        <div class="hint" id="nest-file"></div>
+      </form>
+    </div>
+  </section>
+
+  <section class="card wide">
+    <h2>Console</h2>
+    <div class="body"><div id="console"></div></div>
+  </section>
+</main>
+<div id="toast"></div>
+
+<script>
+(() => {
+  'use strict';
+  const STEPS = [0.01, 0.05, 0.1, 1.0];
+  const TESTZ = [-1, -0.1, -0.05, -0.01];
+  const SETTINGS = ['tool_count', 'kinematics_type', 'dock_x_travel', 'lock_retract_dist',
+                    'clear_y_dist', 'probe_type', 'ball_od', 'front_dock_max_y'];
+  const $ = (id) => document.getElementById(id);
+  let st = null, busy = 0, jogStep = 0.1, settingsDirty = false, streamSet = false, lastPrompt = '';
+
+  function el(tag, props, children) {
+    const e = document.createElement(tag);
+    const { dataset, ...rest } = props || {};
+    Object.assign(e, rest);
+    Object.assign(e.dataset, dataset || {});
+    (children || []).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
+    return e;
+  }
+  function toast(msg) {
+    const t = $('toast'); t.textContent = msg; t.style.display = 'block';
+    clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.style.display = 'none'; }, 8000);
+  }
+
+  // ---- Moonraker API ----
+  async function api(path, opts) {
+    const r = await fetch(path, opts);
+    let body = null;
+    try { body = await r.json(); } catch (e) {}
+    if (!r.ok) {
+      const msg = (body && body.error && body.error.message) || r.statusText;
+      throw new Error(r.status === 401 ? 'Not authorized: add this network to Moonraker trusted_clients' : msg);
+    }
+    return body && body.result;
+  }
+  async function gcode(script) {
+    busy++; $('chip-busy').classList.remove('hidden');
+    try {
+      await api('/printer/gcode/script?script=' + encodeURIComponent(script), { method: 'POST' });
+    } catch (e) {
+      toast(script + '\n' + e.message);
+    } finally {
+      busy--; if (!busy) $('chip-busy').classList.add('hidden');
+      poll();
+    }
+  }
+  document.addEventListener('click', (ev) => {
+    const b = ev.target.closest('button[data-gcode]');
+    if (b && !b.disabled) gcode(b.dataset.gcode);
+  });
+
+  // ---- Status polling ----
+  async function poll() {
+    try {
+      const res = await api('/printer/objects/query?dragons_den&toolhead=position,homed_axes&manual_probe&webhooks');
+      st = res.status;
+      render();
+    } catch (e) {
+      $('chip-klippy').textContent = 'Klipper: ' + e.message;
+      $('chip-klippy').className = 'chip bad';
+    }
+  }
+  async function pollConsole() {
+    try {
+      const res = await api('/server/gcode_store?count=40');
+      const lines = res.gcode_store.map(g => (g.type === 'command' ? '> ' : '') + g.message)
+        .filter(m => !m.startsWith('// action:prompt'));
+      const c = $('console'), atBottom = c.scrollTop + c.clientHeight >= c.scrollHeight - 4;
+      c.textContent = lines.join('\n');
+      if (atBottom) c.scrollTop = c.scrollHeight;
+    } catch (e) {}
+  }
+
+  function fmt(v) { return v === null || v === undefined ? '–' : Number(v).toFixed(3); }
+
+  function render() {
+    const dd = st.dragons_den, th = st.toolhead, wh = st.webhooks || {};
+    const ready = wh.state === 'ready';
+    $('chip-klippy').textContent = 'Klipper: ' + (wh.state || '?');
+    $('chip-klippy').className = 'chip ' + (ready ? 'ok' : 'bad');
+    if (!dd || !Object.keys(dd).length) {
+      $('chip-tool').textContent = 'dragons_den not loaded';
+      return;
+    }
+    const n = dd.tool_count, active = dd.active_tool;
+    $('chip-tool').textContent = 'Tool: ' + (active >= 0 ? 'T' + active : 'none');
+    $('chip-homed').textContent = 'Homed: ' + (th.homed_axes || 'no');
+    $('chip-homed').className = 'chip ' + (th.homed_axes === 'xyz' ? 'ok' : '');
+    const p = th.position || [];
+    $('position').textContent = 'Position: X ' + fmt(p[0]) + '  Y ' + fmt(p[1]) + '  Z ' + fmt(p[2]);
+    $('restart-banner').classList.toggle('hidden', !dd.restart_pending);
+    $('probe-type').textContent = dd.probe_type;
+    $('nest-file').textContent = 'File: ' + dd.nest_file;
+    const s = dd.settings || {};
+    $('dock-limit').textContent = 'Front-dock limit: dock Y ' +
+      (s.front_dock_max_y === null || s.front_dock_max_y === undefined ? '< middle of Y travel' : '≤ ' + s.front_dock_max_y) +
+      ' · clearance +' + s.clear_y_dist + ' mm';
+
+    // Tool buttons, tables and selectors (rebuilt when the tool count/active tool changes)
+    const key = n + ':' + active;
+    if (render.toolKey !== key) {
+      render.toolKey = key;
+      const tb = $('tool-buttons'); tb.innerHTML = '';
+      for (let i = 0; i < n; i++)
+        tb.appendChild(el('button', { className: i === active ? 'primary' : 'secondary', textContent: 'T' + i,
+                                       title: 'Change to T' + i, dataset: { gcode: 'T' + i } }));
+      const db = $('dock-buttons'); db.innerHTML = '';
+      for (let i = 0; i < n; i++)
+        db.appendChild(el('button', { className: 'secondary', textContent: 'Calibrate T' + i,
+                                       dataset: { gcode: 'DRAGONS_CALIBRATE_DOCKS TOOL=' + i + ' SINGLE=1' } }));
+      for (const id of ['set-active', 'offset-tool']) {
+        const sel = $(id), prev = sel.value; sel.innerHTML = '';
+        if (id === 'set-active') sel.add(new Option('none', -1));
+        for (let i = 0; i < n; i++) sel.add(new Option('T' + i + (i === 0 ? ' (reference)' : ''), i));
+        sel.value = prev !== '' && prev !== null ? prev : (id === 'set-active' ? active : Math.max(active, 0));
+      }
+    }
+    const tbody = $('tool-table'); tbody.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+      const d = dd.docks['T' + i], o = dd.offsets['T' + i];
+      tbody.appendChild(el('tr', {}, [
+        el('td', { textContent: 'T' + i + (i === active ? ' ●' : '') }),
+        el('td', { textContent: d ? fmt(d.x) + ' / ' + fmt(d.y) + ' / ' + fmt(d.z) : 'not calibrated' }),
+        el('td', { textContent: i === 0 ? 'reference' : (o ? fmt(o.x) + ' / ' + fmt(o.y) + ' / ' + fmt(o.z) : 'not calibrated') }),
+      ]));
+    }
+
+    renderPrompt(dd.prompt);
+    renderProbe(st.manual_probe || {});
+    $('camera-save').disabled = !(dd.wizard === 'offsets' && dd.wizard_step === 'camera');
+    $('camera-save').textContent = dd.wizard_tool >= 0 ? 'Save T' + dd.wizard_tool : 'Save';
+
+    if (!streamSet) {
+      $('stream').src = dd.camera_url;
+      $('radius').value = dd.camera_circle_px;
+      streamSet = true;
+    }
+    if (!settingsDirty) fillSettings(s);
+    draw();
+  }
+
+  function renderPrompt(prompt) {
+    const card = $('card-prompt');
+    const sig = JSON.stringify(prompt);
+    if (sig === lastPrompt) return;
+    lastPrompt = sig;
+    if (!prompt) { card.classList.add('hidden'); return; }
+    card.classList.remove('hidden');
+    $('prompt-title').textContent = prompt.title;
+    const items = $('prompt-items'); items.innerHTML = '';
+    for (const it of prompt.items) {
+      if (it.type === 'text') items.appendChild(el('p', { textContent: it.text }));
+      else items.appendChild(el('div', { className: 'row' }, it.buttons.map(b =>
+        el('button', { className: b.style, textContent: b.label, dataset: { gcode: b.gcode } }))));
+    }
+    const footer = $('prompt-footer'); footer.innerHTML = '';
+    prompt.footer.forEach(b => footer.appendChild(
+      el('button', { className: b.style, textContent: b.label, dataset: { gcode: b.gcode } })));
+  }
+
+  function renderProbe(mp) {
+    $('card-probe').classList.toggle('hidden', !mp.is_active);
+    if (!mp.is_active) return;
+    $('probe-z').textContent = fmt(mp.z_position);
+    $('probe-range').textContent = (mp.z_position_lower !== null || mp.z_position_upper !== null)
+      ? '(between ' + fmt(mp.z_position_lower) + ' and ' + fmt(mp.z_position_upper) + ')' : '';
+  }
+
+  function fillSettings(s) {
+    const f = $('settings');
+    for (const k of SETTINGS) {
+      const v = s[k];
+      f.elements[k].value = v === null || v === undefined ? '' : v;
+    }
+  }
+
+  // ---- Settings form ----
+  $('settings').addEventListener('input', () => { settingsDirty = true; });
+  $('settings-reset').onclick = () => { settingsDirty = false; if (st) fillSettings(st.dragons_den.settings); };
+  $('settings').addEventListener('submit', (ev) => {
+    ev.preventDefault();
+    const f = ev.target, parts = ['DRAGONS_SAVE_SETTINGS'];
+    for (const k of SETTINGS) {
+      const v = String(f.elements[k].value).trim();
+      if (v === '' && k !== 'front_dock_max_y') continue;
+      parts.push(k.toUpperCase() + '=' + (v === '' ? 'none' : v));
+    }
+    settingsDirty = false;
+    gcode(parts.join(' '));
+  });
+
+  // ---- Tool / offsets controls ----
+  $('set-active-btn').onclick = () => gcode('DRAGONS_SET_ACTIVE_TOOL TOOL=' + $('set-active').value);
+  $('cal-offsets').onclick = () => gcode('DRAGONS_CALIBRATE_OFFSETS TOOL=' + $('offset-tool').value);
+  $('paper-test').onclick = () => gcode('DRAGONS_PAPER_TEST TOOL=' + $('offset-tool').value);
+  $('camera-save').onclick = () => gcode('DRAGONS_CAMERA_SAVE');
+
+  // TESTZ buttons
+  for (const d of TESTZ) $('testz-down').appendChild(el('button', { className: 'secondary', textContent: String(d), dataset: { gcode: 'TESTZ Z=' + d } }));
+  for (const d of TESTZ.slice().reverse()) $('testz-up').appendChild(el('button', { className: 'secondary', textContent: '+' + (-d), dataset: { gcode: 'TESTZ Z=' + (-d) } }));
+
+  // ---- Camera view ----
+  for (const s of STEPS) {
+    const b = el('button', { className: s === jogStep ? 'secondary on' : 'secondary', textContent: String(s) });
+    b.onclick = () => { jogStep = s; document.querySelectorAll('#steps button').forEach(x => x.classList.toggle('on', x === b)); };
+    $('steps').appendChild(b);
+  }
+  document.querySelectorAll('[data-jog]').forEach(b => {
+    b.onclick = () => gcode('DRAGONS_JOG ' + b.dataset.jog + '=' + (Number(b.dataset.dir) * jogStep));
+  });
+  function draw() {
+    const c = $('overlay'), img = $('stream');
+    const w = c.clientWidth, h = c.clientHeight;
+    if (!w || !h) return;
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    const nat = img.naturalWidth || w, natH = img.naturalHeight || h;
+    const scale = Math.min(w / nat, h / natH);
+    const r = Number($('radius').value) * scale;
+    $('radius-val').textContent = $('radius').value + ' px';
+    const cx = w / 2, cy = h / 2;
+    ctx.clearRect(0, 0, w, h);
+    ctx.strokeStyle = '#ff5252'; ctx.lineWidth = 1.5;
+    ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();
+    ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.stroke();
+  }
+  $('radius').oninput = draw;
+  window.addEventListener('resize', draw);
+
+  poll(); pollConsole();
+  setInterval(poll, 1000);
+  setInterval(pollConsole, 2000);
+})();
+</script>
+</body>
+</html>

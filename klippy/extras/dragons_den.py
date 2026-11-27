@@ -24,6 +24,7 @@ It is applied directly as a G-code offset (SET_GCODE_OFFSET), so T0 is always
 import configparser
 import logging
 import os
+import re
 
 VERSION = "0.0.1"
 
@@ -75,6 +76,7 @@ class NestState:
         self.docks = {}        # tool -> [x, y, z or None]
         self.offsets = {}      # tool -> [x, y, z]
         self.reference = None  # {'method': probe_type, 'pos': [x, y, z]}
+        self.paper_ref_z = None  # T0 paper Z-test result
 
     def offset(self, tool):
         if tool is None or tool <= 0:
@@ -128,6 +130,8 @@ class NestStore:
                 state.reference = {
                     'method': cp.get('reference', 'method'),
                     'pos': [cp.getfloat('reference', a) for a in AXES]}
+            if cp.has_section('paper_reference'):
+                state.paper_ref_z = cp.getfloat('paper_reference', 'z')
             for section in cp.sections():
                 parts = section.split()
                 if len(parts) != 2 or parts[0] != 'tool':
@@ -156,6 +160,9 @@ class NestStore:
                      "method = %s" % (state.reference['method'],)]
             body += ["%s = %.6f" % (a, v)
                      for a, v in zip(AXES, state.reference['pos'])]
+        if state.paper_ref_z is not None:
+            body += ["", "[paper_reference]",
+                     "z = %.6f" % (state.paper_ref_z,)]
         for tool in sorted(set(state.docks) | set(state.offsets)):
             body += ["", "[tool T%d]" % (tool,)]
             dock = state.docks.get(tool)
@@ -175,11 +182,63 @@ class NestStore:
         if lines is None:
             lines = list(DEFAULT_HEADER)
         user, _ = self._split(lines)
+        self._write(user, self.encode(state))
+
+    def update_settings(self, section, values):
+        """Set `key: value` options in the user part of the file.
+
+        An existing option line is replaced; a commented-out one
+        ("#key: ...") is uncommented in place; otherwise the option is added
+        at the end of the section. Comments and the state block are kept.
+        A missing section is appended."""
+        lines = self._read_lines()
+        if lines is None:
+            lines = list(DEFAULT_HEADER)
+        user, body = self._split(lines)
+        header = "[%s]" % (section,)
+        start = next((i for i, l in enumerate(user)
+                      if l.strip().lower() == header), None)
+        if start is None:
+            while user and not user[-1].strip():
+                user.pop()
+            user += ["", header]
+            start = len(user) - 1
+        end = next((i for i in range(start + 1, len(user))
+                    if user[i].strip().startswith('[')), len(user))
+        for key, value in values.items():
+            new_line = "%s: %s" % (key, value)
+            pattern = re.compile(r"^\s*(#\s*)?%s\s*[:=]" % (re.escape(key),))
+            matches = [i for i in range(start + 1, end)
+                       if pattern.match(user[i])]
+            active = [i for i in matches if not user[i].lstrip()
+                      .startswith('#')]
+            if value is None:
+                # Unset: comment the option out so Klipper uses its default
+                for i in active:
+                    user[i] = "#%s:" % (key,)
+                continue
+            if active:
+                user[active[0]] = new_line
+            elif matches:
+                user[matches[0]] = new_line
+            else:
+                last = start
+                for i in range(start + 1, end):
+                    if user[i].strip():
+                        last = i
+                user.insert(last + 1, new_line)
+                end += 1
+        self._write(user, body)
+
+    def _write(self, user, body):
+        user = list(user)
         while user and not user[-1].strip():
             user.pop()
-        out = user + ["", STATE_MARKER]
-        out += [(STATE_PREFIX + " " + l) if l else STATE_PREFIX
-                for l in self.encode(state)]
+        out = user
+        if body:
+            out = user + ["", STATE_MARKER]
+            out += [(STATE_PREFIX + " " + l) if l else STATE_PREFIX
+                    for l in body]
         real = os.path.realpath(self.path)
         tmp = real + ".tmp"
         with open(tmp, 'w') as f:
@@ -243,6 +302,9 @@ class DragonsDen:
         self.camera_url = config.get('camera_url', '/webcam/?action=stream')
         self.camera_circle_px = config.getint('camera_circle_px', 60,
                                               minval=1)
+        # Paper Z-test (Z-only offset by manual probe)
+        self.paper_test_point = config.getfloatlist('paper_test_point', None,
+                                                    count=2)
         if self.probe_type == 'sexball' and self.ball_od <= 0.:
             raise config.error(
                 "ball_od (caliper measurement) must be set when probe_type"
@@ -263,7 +325,9 @@ class DragonsDen:
             self.state.active_tool = -1
         # Wizard state
         self._wizard = None
+        self._prompt_state = None   # mirror of the open prompt for the panel
         self.jog_step = 1.0
+        self.restart_pending = False
         # Events and commands
         self.printer.register_event_handler("klippy:connect",
                                             self._handle_connect)
@@ -290,6 +354,12 @@ class DragonsDen:
              "Abort the running Dragons Den wizard"),
             ('DRAGONS_STATUS', self.cmd_DRAGONS_STATUS,
              "Report Dragons Den docks, offsets and active tool"),
+            ('DRAGONS_TEST_DOCK', self.cmd_DRAGONS_TEST_DOCK,
+             "Slowly dock the active tool to verify its dock position"),
+            ('DRAGONS_PAPER_TEST', self.cmd_DRAGONS_PAPER_TEST,
+             "Measure a tool's Z offset with a manual paper test"),
+            ('DRAGONS_SAVE_SETTINGS', self.cmd_DRAGONS_SAVE_SETTINGS,
+             "Write [dragons_den] settings to dragonsnest.cfg"),
         ]
         for name, func, desc in cmds:
             self.gcode.register_command(name, func, desc=desc)
@@ -335,6 +405,20 @@ class DragonsDen:
             'jog_step': self.jog_step,
             'camera_url': self.camera_url,
             'camera_circle_px': self.camera_circle_px,
+            'prompt': self._prompt_state,
+            'paper_reference': self.state.paper_ref_z is not None,
+            'restart_pending': self.restart_pending,
+            'settings': {
+                'tool_count': self.tool_count,
+                'kinematics_type': self.kinematics_type,
+                'probe_type': self.probe_type,
+                'dock_x_travel': self.dock_x_travel,
+                'lock_retract_dist': self.lock_retract_dist,
+                'clear_y_dist': self.clear_y_dist,
+                'ball_od': self.ball_od,
+                'front_dock_max_y': self.front_dock_max_y,
+            },
+            'nest_file': self.nest.path,
         }
 
     ##################################################################
@@ -625,8 +709,24 @@ class DragonsDen:
         out.append("action:prompt_show")
         for line in out:
             self.gcode.respond_raw("// " + line)
+        # Same content as plain data, so the Dragons Den panel can render
+        # the wizard without parsing console output.
+        def btn(b):
+            return {'label': b[0], 'gcode': b[1], 'style': b[2]}
+        mirror = []
+        for item in items:
+            if item[0] == 'text':
+                mirror.append({'type': 'text', 'text': item[1]})
+            elif item[0] == 'button':
+                mirror.append({'type': 'buttons', 'buttons': [btn(item[1:])]})
+            elif item[0] == 'group':
+                mirror.append({'type': 'buttons',
+                               'buttons': [btn(b) for b in item[1]]})
+        self._prompt_state = {'title': title, 'items': mirror,
+                              'footer': [btn(b) for b in footer]}
 
     def _close_prompt(self):
+        self._prompt_state = None
         self.gcode.respond_raw("// action:prompt_end")
 
     @staticmethod
@@ -784,9 +884,14 @@ class DragonsDen:
 
     def cmd_DRAGONS_CALIBRATE_DOCKS(self, gcmd):
         start = gcmd.get_int('TOOL', 0, minval=0, maxval=self.tool_count - 1)
+        single = gcmd.get_int('SINGLE', 0, minval=0, maxval=1) == 1
         self._wizard = {'kind': 'docks', 'step': 'position', 'tool': start,
-                        'verified': False}
+                        'verified': False, 'single': single}
         self._render()
+
+    def _docks_last(self):
+        w = self._wizard
+        return w.get('single') or w['tool'] >= self.tool_count - 1
 
     def _render_docks_position(self):
         tool = self._wizard['tool']
@@ -837,13 +942,14 @@ class DragonsDen:
     def _render_docks_swap(self):
         w = self._wizard
         tool = w['tool']
-        last = tool >= self.tool_count - 1
+        last = self._docks_last()
         items = []
         if w['verified']:
             items.append(('text', "T%d is parked in its dock." % (tool,)))
         if last:
-            items.append(('text', "All %d docks are calibrated." %
-                          (self.tool_count,)))
+            items.append(('text', "Dock T%d is calibrated." % (tool,)
+                          if w.get('single') else
+                          "All %d docks are calibrated." % (self.tool_count,)))
             if not w['verified']:
                 items.append(('text', "T%d is still attached." % (tool,)))
             items.append(('button', "Finish", self._action('continue'),
@@ -893,7 +999,7 @@ class DragonsDen:
             w['verified'] = False
             w['step'] = 'swap'
         elif step == 'swap' and action == 'continue':
-            if tool >= self.tool_count - 1:
+            if self._docks_last():
                 self._end_wizard("dock calibration complete")
                 return
             w['tool'] = tool + 1
@@ -1185,6 +1291,157 @@ class DragonsDen:
         self._wizard['step'] = 'done'
         self._wizard['tool'] = None
         self._render()
+
+    ##################################################################
+    # Test dock, paper Z-test, settings (used by the Dragons Den panel)
+    ##################################################################
+
+    def cmd_DRAGONS_TEST_DOCK(self, gcmd):
+        """Dock the active tool at verify_speed (front dock, +Y clearance)."""
+        tool = self.state.active_tool
+        if tool < 0:
+            raise gcmd.error("Dragons Den: no tool is attached")
+        self._require_homed("xyz" if self.floating else "xy")
+        self._require_dock(tool)
+        return_z = None
+        if 'z' in self._homed_axes():
+            self._lift(self.z_hop)
+            return_z = self.toolhead.get_position()[2]
+        self._dock_tool(tool, self.verify_speed, self.verify_speed, return_z)
+        self.state.active_tool = -1
+        self._save()
+        off = self.state.offset(tool)
+        self._run("SET_GCODE_OFFSET X_ADJUST=%.6f Y_ADJUST=%.6f"
+                  " Z_ADJUST=%.6f MOVE=0" % tuple(-o for o in off))
+        self._respond("T%d slowly docked; no tool attached" % (tool,))
+
+    def _paper_point(self):
+        if self.paper_test_point is not None:
+            return self.paper_test_point
+        status = self._toolhead_status()
+        mins, maxs = status['axis_minimum'], status['axis_maximum']
+        return [(mins[0] + maxs[0]) / 2., (mins[1] + maxs[1]) / 2.]
+
+    def cmd_DRAGONS_PAPER_TEST(self, gcmd):
+        """Z-only offset: paper test with the manual probe at one bed spot.
+        T0 sets the reference; other tools get offset_z = z - z(T0)."""
+        if manual_probe is None:
+            raise gcmd.error("Dragons Den: manual_probe is unavailable")
+        tool = gcmd.get_int('TOOL', self.state.active_tool,
+                            maxval=self.tool_count - 1)
+        if tool < 0:
+            raise gcmd.error("Dragons Den: no tool attached; pass TOOL=n")
+        self._require_homed(AXES)
+        if tool != 0 and self.state.paper_ref_z is None:
+            raise gcmd.error("Dragons Den: run DRAGONS_PAPER_TEST TOOL=0"
+                             " first (T0 is the Z reference)")
+        if self.state.active_tool != tool:
+            if not self._can_auto_change(tool):
+                raise gcmd.error("Dragons Den: attach T%d first (or calibrate"
+                                 " its dock)" % (tool,))
+            self.change_tool(tool)
+        point = self._paper_point()
+        off = self.state.offset(tool)
+        self._safe_travel(point[0] + off[0], point[1] + off[1],
+                          self.probe_start_z + off[2])
+        self._wizard = {'kind': 'paper', 'step': 'manual_z', 'tool': tool}
+        self._close_prompt()
+        self._respond("paper test T%d: lower the nozzle with TESTZ until the"
+                      " paper just drags, then ACCEPT" % (tool,))
+        manual_probe.ManualProbeHelper(self.printer, gcmd, self._paper_done)
+
+    def _paper_done(self, kin_pos):
+        w = self._wizard
+        if w is None or w.get('kind') != 'paper':
+            return
+        tool = w['tool']
+        if kin_pos is None:
+            self._end_wizard("paper test aborted")
+            return
+        z = kin_pos[2]
+        if tool == 0:
+            self.state.paper_ref_z = z
+            msg = "T0 paper Z reference saved (Z=%.3f)" % (z,)
+        else:
+            off = self.state.offset(tool)
+            new_z = z - self.state.paper_ref_z
+            dz = new_z - off[2]
+            off[2] = new_z
+            self.state.offsets[tool] = off
+            if self.state.active_tool == tool:
+                self._run("SET_GCODE_OFFSET Z_ADJUST=%.6f MOVE=0" % (dz,))
+            msg = "T%d Z offset %.3f saved" % (tool, new_z)
+        self._save()
+        self._lift(self.z_hop)
+        self._end_wizard(msg)
+
+    def cmd_DRAGONS_SAVE_SETTINGS(self, gcmd):
+        """Write [dragons_den] options into dragonsnest.cfg. Klipper reads
+        config only at startup, so a RESTART is needed to apply them."""
+        values = {}
+        for key, (kind, lo, above) in SETTINGS.items():
+            raw = gcmd.get(key.upper(), None)
+            if raw is None:
+                continue
+            raw = raw.strip()
+            if kind == 'optfloat' and raw.lower() in ('', 'none'):
+                values[key] = None
+                continue
+            try:
+                if kind == 'int':
+                    value = int(raw)
+                elif kind in ('float', 'optfloat'):
+                    value = float(raw)
+                else:
+                    value = raw.lower()
+                    if value not in kind:
+                        raise ValueError(raw)
+            except ValueError:
+                raise gcmd.error("Dragons Den: invalid %s '%s'" % (key, raw))
+            if kind == 'int' and not lo <= value <= MAX_TOOLS:
+                raise gcmd.error("Dragons Den: %s must be %d..%d"
+                                 % (key, lo, MAX_TOOLS))
+            if lo is not None and kind != 'int' and value < lo:
+                raise gcmd.error("Dragons Den: %s must be >= %s" % (key, lo))
+            if above is not None and value <= above:
+                raise gcmd.error("Dragons Den: %s must be > %s" % (key, above))
+            values[key] = value
+        if not values:
+            raise gcmd.error("Dragons Den: no settings given")
+        probe = values.get('probe_type', self.probe_type)
+        ball_od = values.get('ball_od', self.ball_od)
+        if probe == 'sexball' and not ball_od > 0.:
+            raise gcmd.error("Dragons Den: sexball needs ball_od > 0")
+        text = {}
+        for key, value in values.items():
+            if value is None:
+                text[key] = None
+            elif isinstance(value, float):
+                text[key] = ("%.4f" % value).rstrip('0').rstrip('.')
+            else:
+                text[key] = str(value)
+        try:
+            self.nest.update_settings('dragons_den', text)
+        except (IOError, OSError) as e:
+            raise self._error("unable to write %s: %s" % (self.nest.path, e))
+        self.restart_pending = True
+        self._respond("settings saved to %s (%s). RESTART Klipper to apply."
+                      % (self.nest.path,
+                         ", ".join("%s=%s" % (k, "unset" if v is None else v)
+                                   for k, v in sorted(text.items()))))
+
+
+# DRAGONS_SAVE_SETTINGS options: kind, minimum (inclusive), above (exclusive)
+SETTINGS = {
+    'tool_count': ('int', 1, None),
+    'kinematics_type': (tuple(KINEMATICS_TYPES), None, None),
+    'probe_type': (tuple(PROBE_TYPES), None, None),
+    'dock_x_travel': ('float', None, None),
+    'lock_retract_dist': ('float', 0., None),
+    'clear_y_dist': ('float', None, 0.),
+    'ball_od': ('float', 0., None),
+    'front_dock_max_y': ('optfloat', None, None),
+}
 
 
 def load_config(config):
