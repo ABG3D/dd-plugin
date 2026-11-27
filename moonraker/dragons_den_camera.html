@@ -1,0 +1,185 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Dragons Den - nozzle alignment</title>
+<style>
+  :root { color-scheme: dark; --bg: #16181c; --panel: #22252b; --text: #e6e6e6;
+          --muted: #9aa0a6; --accent: #e5533d; --ok: #3fb950; --line: #33373e; }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.4 system-ui, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; gap: 12px; align-items: baseline; padding: 10px 16px; border-bottom: 1px solid var(--line); }
+  header h1 { font-size: 16px; margin: 0; }
+  header .status { color: var(--muted); }
+  main { max-width: 760px; margin: 0 auto; padding: 12px 16px; }
+  .view { position: relative; background: #000; border-radius: 6px; overflow: hidden; aspect-ratio: 4 / 3; }
+  .view img, .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
+  .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 10px 0; }
+  .label { color: var(--muted); min-width: 64px; }
+  button, select { background: var(--panel); color: var(--text); border: 1px solid var(--line);
+                   border-radius: 4px; padding: 7px 12px; font: inherit; cursor: pointer; }
+  button:hover { border-color: var(--muted); }
+  button.on { background: var(--accent); border-color: var(--accent); }
+  button.save { background: var(--ok); border-color: var(--ok); color: #000; font-weight: 600; }
+  button:disabled { opacity: .5; cursor: default; }
+  .pad { display: grid; grid-template-columns: repeat(3, 64px); gap: 6px; }
+  .pad button { padding: 10px 0; }
+  .zpad { display: grid; grid-template-rows: repeat(3, auto); gap: 6px; margin-left: 18px; }
+  #log { color: var(--muted); white-space: pre-wrap; min-height: 1.4em; }
+  #log.err { color: var(--accent); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Dragons Den: nozzle alignment</h1>
+  <span class="status" id="status">connecting...</span>
+</header>
+<main>
+  <div class="view">
+    <img id="stream" alt="Alignment camera">
+    <canvas id="overlay"></canvas>
+  </div>
+
+  <div class="row">
+    <span class="label">Tool</span>
+    <select id="tool"></select>
+    <button id="calibrate">Start calibration</button>
+    <span class="status" id="pos"></span>
+  </div>
+
+  <div class="row">
+    <span class="label">Step (mm)</span>
+    <span id="steps"></span>
+  </div>
+
+  <div class="row">
+    <div class="pad">
+      <span></span><button data-jog="Y" data-dir="1">Y+</button><span></span>
+      <button data-jog="X" data-dir="-1">X-</button><span></span><button data-jog="X" data-dir="1">X+</button>
+      <span></span><button data-jog="Y" data-dir="-1">Y-</button><span></span>
+    </div>
+    <div class="zpad">
+      <button data-jog="Z" data-dir="1">Z+ (away)</button>
+      <button data-jog="Z" data-dir="-1">Z- (closer)</button>
+    </div>
+  </div>
+
+  <div class="row">
+    <span class="label">Circle</span>
+    <input type="range" id="radius" min="5" max="300" value="60">
+    <span id="radiusval"></span>
+  </div>
+
+  <div class="row">
+    <button class="save" id="save" disabled>Save</button>
+    <span id="log"></span>
+  </div>
+</main>
+<script>
+(() => {
+  const STEPS = [0.01, 0.05, 0.1, 1.0];
+  const params = new URLSearchParams(location.search);
+  let step = 0.1;
+  let status = null;
+  let streamSet = false;
+
+  const $ = (id) => document.getElementById(id);
+  const log = (msg, err) => { $('log').textContent = msg; $('log').className = err ? 'err' : ''; };
+
+  async function gcode(script) {
+    const r = await fetch('/printer/gcode/script?script=' + encodeURIComponent(script), { method: 'POST' });
+    if (!r.ok) {
+      let msg = r.statusText;
+      try { msg = (await r.json()).error.message; } catch (e) {}
+      throw new Error(msg);
+    }
+  }
+
+  async function run(script) {
+    try { log(script); await gcode(script); log(''); await poll(); }
+    catch (e) { log(e.message, true); }
+  }
+
+  async function poll() {
+    try {
+      const r = await fetch('/printer/objects/query?dragons_den&toolhead=position,homed_axes');
+      if (!r.ok) throw new Error(r.status === 401 ? 'not authorized: add this network to Moonraker trusted_clients' : r.statusText);
+      const s = (await r.json()).result.status;
+      status = s;
+      render();
+    } catch (e) {
+      $('status').textContent = e.message;
+    }
+  }
+
+  function render() {
+    const dd = status.dragons_den, th = status.toolhead;
+    if (!dd) { $('status').textContent = 'dragons_den is not loaded in Klipper'; return; }
+    $('status').textContent = 'v' + dd.version + ' | active ' + (dd.active_tool >= 0 ? 'T' + dd.active_tool : 'none') +
+      (dd.wizard ? ' | calibrating ' + (dd.wizard_tool >= 0 ? 'T' + dd.wizard_tool : '') + ' (' + dd.wizard_step + ')' : '');
+    const p = th.position;
+    $('pos').textContent = th.homed_axes === 'xyz'
+      ? 'X ' + p[0].toFixed(3) + '  Y ' + p[1].toFixed(3) + '  Z ' + p[2].toFixed(3)
+      : 'not homed';
+    const sel = $('tool');
+    if (sel.options.length !== dd.tool_count) {
+      sel.innerHTML = '';
+      for (let i = 0; i < dd.tool_count; i++) sel.add(new Option('T' + i + (i === 0 ? ' (reference)' : ''), i));
+    }
+    $('save').disabled = !(dd.wizard === 'offsets' && dd.wizard_step === 'camera');
+    $('save').textContent = dd.wizard_tool >= 0 ? 'Save T' + dd.wizard_tool : 'Save';
+    if (!streamSet) {
+      $('stream').src = params.get('url') || dd.camera_url;
+      $('radius').value = params.get('r') || dd.camera_circle_px;
+      streamSet = true;
+    }
+    draw();  // MJPEG streams may never fire onload; keep the overlay sized
+  }
+
+  function draw() {
+    const c = $('overlay'), img = $('stream');
+    const w = c.clientWidth, h = c.clientHeight;
+    c.width = w; c.height = h;
+    const ctx = c.getContext('2d');
+    ctx.clearRect(0, 0, w, h);
+    // Scale the circle from stream pixels to displayed pixels.
+    const nat = img.naturalWidth || w, natH = img.naturalHeight || h;
+    const scale = Math.min(w / nat, h / natH);
+    const r = Number($('radius').value) * scale;
+    $('radiusval').textContent = $('radius').value + ' px';
+    const cx = w / 2, cy = h / 2;
+    ctx.strokeStyle = '#ff3b30'; ctx.lineWidth = 1.5;
+    ctx.beginPath();
+    ctx.moveTo(0, cy); ctx.lineTo(w, cy);
+    ctx.moveTo(cx, 0); ctx.lineTo(cx, h);
+    ctx.stroke();
+    ctx.strokeStyle = '#34c759'; ctx.lineWidth = 2;
+    ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
+    ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.stroke();
+  }
+
+  // Step selector
+  for (const s of STEPS) {
+    const b = document.createElement('button');
+    b.textContent = s;
+    b.onclick = () => { step = s; document.querySelectorAll('#steps button').forEach(x => x.classList.toggle('on', x === b)); };
+    if (s === step) b.classList.add('on');
+    $('steps').appendChild(b);
+  }
+  document.querySelectorAll('[data-jog]').forEach(b => {
+    b.onclick = () => run('DRAGONS_JOG ' + b.dataset.jog + '=' + (Number(b.dataset.dir) * step));
+  });
+  $('calibrate').onclick = () => run('DRAGONS_CALIBRATE_OFFSETS TOOL=' + $('tool').value);
+  $('save').onclick = () => run('DRAGONS_CAMERA_SAVE');
+  $('radius').oninput = draw;
+  $('stream').onload = draw;
+  window.addEventListener('resize', draw);
+
+  poll();
+  setInterval(poll, 1000);
+  draw();
+})();
+</script>
+</body>
+</html>
