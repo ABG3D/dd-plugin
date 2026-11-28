@@ -71,6 +71,15 @@
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
   th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity)); }
   th { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-weight: 500; }
+  /* Vuetify-style switch */
+  input.v-switch { appearance: none; -webkit-appearance: none; width: 36px; height: 14px; padding: 0; margin: 0 5px;
+                   border: 0; border-radius: 7px; background: rgba(var(--v-theme-on-surface), .38); position: relative;
+                   cursor: pointer; justify-self: start; }
+  input.v-switch::after { content: ''; position: absolute; top: -3px; left: -4px; width: 20px; height: 20px; border-radius: 50%;
+                          background: rgb(var(--v-theme-surface)); box-shadow: 0 1px 3px rgba(0,0,0,.4); transition: left .15s; }
+  input.v-switch:checked { background: rgba(var(--v-theme-primary), .5); }
+  input.v-switch:checked::after { left: 20px; background: rgb(var(--v-theme-primary)); }
+  input.v-switch:focus { border: 0; }
   label.field { display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: center; margin: 6px 0; }
   .field-group { margin: 10px 0 4px; padding-top: 6px; border-top: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity)); }
   input, select { background: rgba(var(--v-theme-on-surface), .06); color: inherit; border: 0; border-bottom: 1px solid
@@ -125,6 +134,12 @@
         <div>
           <div id="tool-desc">Waiting for Klipper…</div>
           <div class="row" id="sensor-badges"></div>
+          <!-- Without dock sensors a hand swap cannot be identified: set it here -->
+          <div class="row hidden" id="override-row">
+            <span class="hint">Active Tool Override:</span>
+            <select id="override-tool" style="width:auto"></select>
+            <button class="v-btn bg-primary" id="override-btn">Set</button>
+          </div>
         </div>
       </div>
       <div class="v-alert error hidden" id="detach-alert"></div>
@@ -170,7 +185,7 @@
       </div>
       <div class="row hint" id="position">Position: ?</div>
       <table>
-        <thead><tr><th>Tool</th><th>Dock sensor</th><th>Dock X / Y / Z</th><th>Offset X / Y / Z</th></tr></thead>
+        <thead><tr><th>Tool</th><th class="dock-sensor-col">Dock sensor</th><th>Dock X / Y / Z</th><th>Offset X / Y / Z</th></tr></thead>
         <tbody id="tool-table"></tbody>
       </table>
       <div class="row">
@@ -255,6 +270,11 @@
         <label class="field">probe_start_z <input name="probe_start_z" type="number" step="any" min="0.1"></label>
         <label class="field">probe_type
           <select name="probe_type"><option>eddy</option><option>sexball</option><option>usb_camera</option></select></label>
+        <div class="field-group hint">sensors</div>
+        <label class="field">toolhead_sensor_pin <input name="toolhead_sensor_pin" placeholder="e.g. ^PG11 (empty: none)" data-optional></label>
+        <label class="field">Enable Dock Sensors <input type="checkbox" class="v-switch" name="dock_sensors_enabled" id="dock-sensors-toggle" checked></label>
+        <!-- dock_sensor_pin_t0..tn, built for the current tool_count; hidden while dock sensors are off -->
+        <div id="dock-pin-fields"></div>
         <!-- Probe specific: only the selected probe_type's fields are shown and saved -->
         <div data-probe="sexball">
           <div class="field-group hint">sexball</div>
@@ -278,7 +298,6 @@
           <button class="v-btn bg-primary" type="submit">Save to dragonsnest.cfg</button>
           <button class="v-btn" type="button" id="settings-reset">Revert</button>
         </div>
-        <div class="hint">Sensor pins (toolhead_sensor_pin, dock_sensor_pin_t0…) are edited in dragonsnest.cfg.</div>
         <div class="hint" id="nest-file"></div>
       </form>
     </div>
@@ -416,6 +435,7 @@
   function renderIndicator(dd) {
     const state = dd.tool_state || (dd.active_tool >= 0 ? 'attached' : 'none');
     const active = dd.active_tool, sensors = dd.sensors || { toolhead: null, docks: {} };
+    const docksOn = (dd.settings || {}).dock_sensors_enabled !== false;
     const big = { attached: 'T' + active, none: 'None', detached: 'Detached', unknown: 'Error' }[state] || '?';
     $('tool-indicator').className = 'tool-indicator state-' + state;
     $('tool-big').textContent = big;
@@ -423,12 +443,13 @@
       attached: 'T' + active + ' is attached to the toolhead.',
       none: 'No tool is attached.',
       detached: 'T' + active + ' detached from the toolhead unexpectedly.',
-      unknown: 'The sensors disagree with the active tool (' + (active >= 0 ? 'T' + active : 'none') + ').',
+      unknown: docksOn ? 'The sensors disagree with the active tool (' + (active >= 0 ? 'T' + active : 'none') + ').'
+                       : 'A hotend is on the toolhead but the active tool is none: pick it with Active Tool Override.',
     }[state] || '';
     $('tool-desc').textContent = desc + (sensors.toolhead === null ? ' No toolhead sensor configured.' : '');
     const badges = $('sensor-badges'); badges.innerHTML = '';
     badges.appendChild(el('span', { className: sensorClass(sensors.toolhead), textContent: 'Toolhead: ' + sensorText(sensors.toolhead) }));
-    for (let i = 0; i < dd.tool_count; i++) {
+    for (let i = 0; docksOn && i < dd.tool_count; i++) {
       const v = (sensors.docks || {})['T' + i];
       badges.appendChild(el('span', { className: sensorClass(v), textContent: 'T' + i + ' dock: ' + sensorText(v) }));
     }
@@ -436,7 +457,9 @@
     alert.classList.toggle('hidden', state !== 'detached' && state !== 'unknown');
     alert.textContent = state === 'detached'
       ? 'T' + active + ' fell off or was pulled off during a print. Re-attach it by hand (it is detected automatically), check the print, then RESUME.'
-      : 'A hotend is seated but the dock sensors do not identify it, or they contradict the active tool. Check the tools, or set the attached tool below.';
+      : docksOn ? 'A hotend is seated but the dock sensors do not identify it, or they contradict the active tool. Check the tools, or set the attached tool below.'
+                : 'Dock sensors are off, so a hotend attached by hand cannot be identified. Select it with Active Tool Override.';
+    $('override-row').classList.toggle('hidden', docksOn && $('dock-sensors-toggle').checked);
   }
 
   function render() {
@@ -481,20 +504,21 @@
       }
       const db = $('dock-buttons'); db.innerHTML = '';
       for (let i = 0; i < n; i++) db.appendChild(btn('Calibrate T' + i, 'secondary', 'DD_CALIBRATE_DOCKS TOOL=' + i + ' SINGLE=1'));
-      for (const id of ['set-active', 'offset-tool']) {
+      for (const id of ['set-active', 'override-tool', 'offset-tool']) {
         const sel = $(id), prev = sel.value; sel.innerHTML = '';
-        if (id === 'set-active') sel.add(new Option('none', -1));
+        if (id !== 'offset-tool') sel.add(new Option('None', -1));
         for (let i = 0; i < n; i++) sel.add(new Option('T' + i + (i === 0 ? ' (reference)' : ''), i));
-        sel.value = prev !== '' && prev !== null ? prev : (id === 'set-active' ? active : Math.max(active, 0));
+        sel.value = prev !== '' && prev !== null ? prev : (id !== 'offset-tool' ? active : Math.max(active, 0));
       }
     }
     const tbody = $('tool-table'); tbody.innerHTML = '';
-    const docks = (dd.sensors || {}).docks || {};
+    const docks = (dd.sensors || {}).docks || {}, docksOn = s.dock_sensors_enabled !== false;
+    document.querySelectorAll('.dock-sensor-col').forEach(c => c.classList.toggle('hidden', !docksOn));
     for (let i = 0; i < n; i++) {
       const d = dd.docks['T' + i], o = dd.offsets['T' + i], v = docks['T' + i];
       tbody.appendChild(el('tr', {}, [
         el('td', { textContent: 'T' + i + (i === active ? ' ●' : '') }),
-        el('td', {}, [el('span', { className: sensorClass(v), textContent: sensorText(v) })]),
+        el('td', { className: 'dock-sensor-col' + (docksOn ? '' : ' hidden') }, [el('span', { className: sensorClass(v), textContent: sensorText(v) })]),
         el('td', { textContent: d ? fmt(d.x) + ' / ' + fmt(d.y) + ' / ' + fmt(d.z) : 'not calibrated' }),
         el('td', { textContent: i === 0 ? 'reference' : (o ? fmt(o.x) + ' / ' + fmt(o.y) + ' / ' + fmt(o.z) : 'not calibrated') }),
       ]));
@@ -510,7 +534,10 @@
       $('radius').value = dd.camera_circle_px;
       streamSet = true;
     }
-    if (!settingsDirty) fillSettings(s);
+    buildPinFields(n);
+    // The form shows what dragonsnest.cfg holds: running values plus any
+    // saved since the last restart
+    if (!settingsDirty) fillSettings(Object.assign({}, s, dd.pending_settings || {}));
     draw();
   }
 
@@ -547,22 +574,52 @@
     const probe = form.elements.probe_type.value;
     form.querySelectorAll('[data-probe]').forEach(g => g.classList.toggle('hidden', g.dataset.probe !== probe));
   }
+  const toggle = $('dock-sensors-toggle');
+  function buildPinFields(n) {
+    if (buildPinFields.count === n) return;            // keep what the user typed
+    buildPinFields.count = n;
+    const box = $('dock-pin-fields'); box.innerHTML = '';
+    for (let i = 0; i < n; i++) {
+      const input = el('input', { name: 'dock_sensor_pin_t' + i, placeholder: 'e.g. ^PG1' + (2 + i) + ' (empty: none)',
+                                  dataset: { optional: '', dockPin: '' } });
+      box.appendChild(el('label', { className: 'field' }, ['dock_sensor_pin_t' + i + ' ', input]));
+    }
+    if (st) { const v = Object.assign({}, st.dragons_den.settings, st.dragons_den.pending_settings || {}); fields().filter(f => 'dockPin' in f.dataset).forEach(f => { f.value = v[f.name] || ''; }); }
+  }
+  function showDockSensorFields() {
+    $('dock-pin-fields').classList.toggle('hidden', !toggle.checked);
+    const running = st && st.dragons_den && st.dragons_den.settings ? st.dragons_den.settings.dock_sensors_enabled !== false : true;
+    $('override-row').classList.toggle('hidden', running && toggle.checked);
+  }
   function fillSettings(s) {
     for (const f of fields()) {
       const v = s[f.name];
-      f.value = v === null || v === undefined ? '' : (Array.isArray(v) ? v.join(', ') : v);
+      if (f.type === 'checkbox') f.checked = v !== false;
+      else f.value = v === null || v === undefined ? '' : (Array.isArray(v) ? v.join(', ') : v);
     }
     showProbeFields();
+    showDockSensorFields();
   }
-  form.addEventListener('input', () => { settingsDirty = true; });
+  form.addEventListener('input', (ev) => { if (ev.target !== toggle) settingsDirty = true; });
+  // The dock sensor switch is saved at once (Klipper applies it after a restart)
+  toggle.addEventListener('change', () => {
+    showDockSensorFields();
+    gcode('DD_SET_CONFIG DOCK_SENSORS_ENABLED=' + (toggle.checked ? 'True' : 'False'));
+  });
+  $('override-btn').onclick = () => gcode('DD_SET_ACTIVE_TOOL TOOL=' + $('override-tool').value);
   form.elements.probe_type.addEventListener('change', showProbeFields);
-  $('settings-reset').onclick = () => { settingsDirty = false; if (st) fillSettings(st.dragons_den.settings); };
+  $('settings-reset').onclick = () => {
+    settingsDirty = false;
+    if (st) fillSettings(Object.assign({}, st.dragons_den.settings, st.dragons_den.pending_settings || {}));
+  };
   form.addEventListener('submit', (ev) => {
     ev.preventDefault();
     const probe = form.elements.probe_type.value, parts = ['DD_SET_CONFIG'];
     for (const f of fields()) {
       const group = probeGroup(f);
       if (group && group !== probe) continue;          // other probes' fields are not saved
+      if ('dockPin' in f.dataset && !toggle.checked) continue;
+      if (f.type === 'checkbox') { parts.push(f.name.toUpperCase() + '=' + (f.checked ? 'True' : 'False')); continue; }
       let v = String(f.value).trim();
       if (v === '') {
         if (!('optional' in f.dataset)) continue;

@@ -57,6 +57,7 @@ toolhead_sensor_pin: ^PG11      # hotend seated on the toolhead
 dock_sensor_pin_t0: ^PG12       # T0 seated in its dock
 dock_sensor_pin_t1: ^PG13
 dock_sensor_pin_t2: ^toolboard:PB5
+#dock_sensors_enabled: True     # False: build without dock sensors
 #pause_on_detach: True          # PAUSE when a hotend is lost mid-print
 #detach_gcode:                  # extra G-code run when that happens
 #sensor_settle_time: 0.3        # seconds to let the pins report after a move
@@ -67,6 +68,7 @@ What the sensors do:
 - **Automatic tool detection.** Whenever a pin changes, the plugin works out the attached tool. If the toolhead sensor is triggered and exactly one dock reports empty, that tool is the active one. This also works when you put a hotend on by hand without a tool-change command: its G-code offset is applied and it is saved as the active tool. Taking a hotend off by hand (not printing) sets the active tool to none.
 - **Checked tool changes.** After docking, the toolhead must report empty and the tool's dock seated. After a pickup, the toolhead must report a hotend and the dock empty. Otherwise the command stops with an error, and the active tool keeps its last confirmed state. A tool change also refuses to start while the sensors contradict the active tool.
 - **Detachment while printing.** If the toolhead sensor opens during a print without a tool change, the plugin marks the tool **Detached**, reports it with `!!` in the console, shows a prompt and runs `PAUSE` plus `detach_gcode`. With `pause_on_detach: False`, only `detach_gcode` runs. Push the hotend back on: it is detected and the error clears. Then check the print and `RESUME`. `DD_SET_ACTIVE_TOOL` clears the error too.
+- **Builds without dock sensors** set `dock_sensors_enabled: False` (or switch off **Enable Dock Sensors** in the panel). Klipper then starts without registering any `dock_sensor_pin_t*` pins, even if they are still in the config. The toolhead sensor, if fitted, still confirms that a hotend is attached or removed, and still catches failed pickups and hotends lost mid-print. The active tool comes from tool changes, `DD_SET_ACTIVE_TOOL` and the state saved in `dragonsnest.cfg`. A hotend pushed on by hand can't be identified, so the indicator shows `Error` until you choose the tool with **Active Tool Override** in the panel (or `DD_SET_ACTIVE_TOOL TOOL=n`).
 - During calibration wizards the plugin ignores sensor changes, because you swap tools by hand there. It re-checks the sensors when the wizard ends.
 
 `printer.dragons_den` reports `tool_state` (`attached`, `none`, `detached`, or `unknown` when the sensors can't identify the hotend or contradict the active tool), `detected_tool`, and `sensors` (`toolhead` and `docks.T0`..`Tn` as `true`/`false`, or `null` when no pin is configured).
@@ -153,11 +155,11 @@ The panel polls Klipper once a second and sends every action as a G-code command
 |---|---|
 | **Wizard** (while one runs) | Mirrors the open action prompt: instructions, jog buttons, Accept/OK/Save, Cancel |
 | **Paper Z-Test (TESTZ)** (while Klipper's manual probe is active) | Current Z, `TESTZ` −1/−0.1/−0.05/−0.01 and +0.01/+0.05/+0.1/+1, Accept, Abort |
-| **Attached Tool** | Large live indicator: `T0`..`Tn`, `None`, `Detached` or `Error` (sensors disagree), with badges for the toolhead sensor and every dock sensor (`seated`, `empty` or `n/a`) |
+| **Attached Tool** | Large live indicator: `T0`..`Tn`, `None`, `Detached` or `Error` (sensors disagree), with badges for the toolhead sensor and every dock sensor (`seated`, `empty` or `n/a`). With dock sensors off, the dock badges are hidden and an **Active Tool Override** selector (`None`, `T0`..`Tn`) appears |
 | **Tool Control & Status** | `T0`..`Tn` quick select, Dock Active Tool, Home All, active tool, homed axes, position, dock sensor / dock / offset table, set the attached tool without motion |
 | **Dock Calibration** | Calibrate All Docks, Calibrate T0..Tn (one tool each), Test Slow Dock; shows the front-dock limit and `+Y` clearance |
 | **Offset Calibration** | Calibrate Offsets and Paper Z-Test for the selected tool, plus the controls of the running `probe_type` only: the USB camera live view (crosshair, Z-focus circle, 0.01 / 0.05 / 0.1 / 1.0 mm jog, Save), or the sexball or eddy instructions |
-| **Settings & Persistence** | Common options (`tool_count`, `kinematics_type`, `dock_x_travel`, `lock_retract_dist`, `clear_y_dist`, `front_dock_max_y`, `probe_start_z`, `probe_type`), then only the selected probe's options: sexball `ball_od`, `ball_center`, `ball_clearance`; eddy `eddy_xy_target`, `eddy_z_point`, `eddy_probe_method`; usb_camera `camera_position`, `camera_url`, `camera_circle_px`. **Save to dragonsnest.cfg** saves the visible fields only |
+| **Settings & Persistence** | Common options (`tool_count`, `kinematics_type`, `dock_x_travel`, `lock_retract_dist`, `clear_y_dist`, `front_dock_max_y`, `probe_start_z`, `probe_type`), sensors (`toolhead_sensor_pin`, the **Enable Dock Sensors** switch, which saves at once, and `dock_sensor_pin_t0`..`tn`, shown only while the switch is on), then only the selected probe's options: sexball `ball_od`, `ball_center`, `ball_clearance`; eddy `eddy_xy_target`, `eddy_z_point`, `eddy_probe_method`; usb_camera `camera_position`, `camera_url`, `camera_circle_px`. **Save to dragonsnest.cfg** saves the visible fields only. Values saved but not yet applied (Klipper needs a restart) stay shown in the form |
 | **Console** | Recent G-code responses |
 
 **Saving settings** writes the values into the `[dragons_den]` section of `dragonsnest.cfg` (`DD_SET_CONFIG`). Existing lines are replaced, commented-out options are uncommented in place, comments and the state block are kept. Klipper reads its config only at startup, so the panel then shows a **Restart Klipper** button. The settings must live in `dragonsnest.cfg`; if you moved `[dragons_den]` into `printer.cfg`, edit them there instead.
@@ -191,6 +193,7 @@ The panel polls Klipper once a second and sends every action as a G-code command
 | `paper_test_point` | bed center | Bed spot `x, y` for `DD_PAPER_TEST` |
 | `toolhead_sensor_pin` | (none) | Switch that is triggered while a hotend is seated on the toolhead |
 | `dock_sensor_pin_t0` .. `dock_sensor_pin_t<n-1>` | (none) | Switch that is triggered while that tool is seated in its dock |
+| `dock_sensors_enabled` | `True` | `False` ignores all dock sensor pins (not registered, not required). The active tool is then tracked by tool changes, `DD_SET_ACTIVE_TOOL` and `dragonsnest.cfg` |
 | `pause_on_detach` | `True` | `PAUSE` when the toolhead loses its hotend during a print |
 | `detach_gcode` | (none) | Extra G-code run when a hotend is lost during a print |
 | `sensor_settle_time` | `0.3` | Seconds to wait for the sensor pins after a dock or pickup before checking them |
@@ -268,7 +271,7 @@ The printer prompt shows the same jog and Save controls if you'd rather stay in 
 | `DD_CALIBRATE_OFFSETS [TOOL=n]` | Offset calibration wizard |
 | `DD_PAPER_TEST [TOOL=n]` | Z-only offset by manual paper test (T0 first) |
 | `DD_CAMERA_SAVE` | Save during usb_camera calibration |
-| `DD_SET_CONFIG [OPTION=value ...]` | Write `[dragons_den]` options to `dragonsnest.cfg` (restart to apply). Accepts every option in the Settings card, e.g. `DD_SET_CONFIG PROBE_TYPE=eddy EDDY_XY_TARGET=120,130 CAMERA_URL="/webcam/?action=stream"`. `=none` unsets an optional value |
+| `DD_SET_CONFIG [OPTION=value ...]` | Write `[dragons_den]` options to `dragonsnest.cfg` (restart to apply). Accepts every option in the Settings card, e.g. `DD_SET_CONFIG PROBE_TYPE=eddy EDDY_XY_TARGET=120,130 CAMERA_URL="/webcam/?action=stream"` or `DD_SET_CONFIG DOCK_SENSORS_ENABLED=False TOOLHEAD_SENSOR_PIN=^PG11 DOCK_SENSOR_PIN_T0=none`. `=none` unsets an optional value |
 | `DD_JOG [X=] [Y=] [Z=]` / `DD_JOG_STEP STEP=` | Wizard jogging |
 | `DD_STATUS` | Print docks, offsets, active tool and sensor states |
 | `DD_ABORT` | Close the running wizard |
@@ -292,6 +295,7 @@ The tests mock Klipper's `printer`, `gcode`, `toolhead` (with step-counting step
 - all three offset modes and the paper Z-test
 - tool change kinematics and test docking
 - toolhead and dock sensors: hand-attachment detection, ambiguous states, checked docks and pickups, detachment mid-print
+- `dock_sensors_enabled` on and off: dock pins skipped, toolhead-only tracking, manual override, saving to `dragonsnest.cfg`
 - `dragonsnest.cfg` persistence and settings saving
 - the panel's prompt mirroring
 - the Mainsail sidebar merge and `install.sh`

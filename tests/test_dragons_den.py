@@ -18,13 +18,14 @@ BASE_OPTIONS = {
 }
 
 
-def make(tmp_path, new_api=True, **options):
+def make(tmp_path, new_api=True, ready=True, **options):
     opts = dict(BASE_OPTIONS)
     opts.update(options)
     printer = FakePrinter(str(tmp_path / "printer.cfg"), new_api=new_api)
     den = dragons_den.load_config(FakeConfig(printer, opts))
     printer.send_event("klippy:connect")
-    printer.send_event("klippy:ready")
+    if ready:
+        printer.send_event("klippy:ready")
     return printer, den
 
 
@@ -853,3 +854,152 @@ def test_sensors_ignored_during_wizard(tmp_path):
     assert den.state.active_tool == -1                 # wizard owns it
     printer.gcode.run("DD_RESPOND ACTION=cancel")
     assert den.state.active_tool == 0                  # reconciled after
+
+
+######################################################################
+# dock_sensors_enabled
+######################################################################
+
+def test_dock_sensors_enabled_by_default(tmp_path):
+    printer, den, buttons = make_sensored(tmp_path)
+    assert den.dock_sensors_enabled is True
+    assert set(buttons.callbacks) == {TH_PIN} | set(DOCK_PINS.values())
+    assert den.get_status()['settings']['dock_sensors_enabled'] is True
+
+
+def test_dock_sensors_disabled_skips_dock_pins(tmp_path):
+    printer, den, buttons = make_sensored(tmp_path,
+                                          dock_sensors_enabled='False')
+    assert set(buttons.callbacks) == {TH_PIN}     # dock pins not registered
+    st = den.get_status()
+    assert st['sensors']['docks'] == {'T0': None, 'T1': None, 'T2': None}
+    assert st['settings']['dock_sensors_enabled'] is False
+    # The pin options are still read, so Klipper accepts the config
+    assert st['settings']['dock_sensor_pin_t1'] == DOCK_PINS[1]
+
+
+def test_dock_sensors_disabled_without_toolhead_sensor(tmp_path):
+    printer, den = make(tmp_path, dock_sensors_enabled='False',
+                        dock_sensor_pin_t0='PG12')
+    assert 'buttons' not in printer.objects        # nothing to register
+    assert den.get_status()['tool_state'] == 'none'
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+def test_hand_attachment_by_mode(tmp_path, enabled):
+    printer, den, buttons = make_sensored(
+        tmp_path, dock_sensors_enabled=str(enabled))
+    if enabled:
+        seat(buttons, docks={0: True, 1: True, 2: True})
+        seat(buttons, docks={1: False})
+    seat(buttons, toolhead=True)                    # T1 pushed on by hand
+    st = den.get_status()
+    if enabled:
+        assert st['active_tool'] == 1 and st['tool_state'] == 'attached'
+    else:
+        # Only the toolhead sensor: seated, but which tool is unknown
+        assert st['active_tool'] == -1 and st['tool_state'] == 'unknown'
+        assert st['detected_tool'] == -1
+
+
+def test_manual_tracking_without_dock_sensors(tmp_path):
+    printer, den, buttons = make_sensored(tmp_path,
+                                          dock_sensors_enabled='False')
+    den.state.offsets = {2: [0.5, 0., 0.1]}
+    seat(buttons, toolhead=True)
+    assert den.get_status()['tool_state'] == 'unknown'
+    # Active Tool Override in the panel
+    printer.gcode.run("DD_SET_ACTIVE_TOOL TOOL=2")
+    st = den.get_status()
+    assert st['active_tool'] == 2 and st['tool_state'] == 'attached'
+    assert reload_state(tmp_path).active_tool == 2
+    # The toolhead sensor alone still confirms removal by hand ...
+    seat(buttons, toolhead=False)
+    assert den.state.active_tool == -1
+    assert printer.gcode.offset_cmds[-1]['X_ADJUST'] == '-0.500000'
+    assert reload_state(tmp_path).active_tool == -1
+    # ... and a hand-attached hotend stays unidentified until overridden
+    seat(buttons, toolhead=True)
+    assert den.get_status()['tool_state'] == 'unknown'
+    with pytest.raises(CommandError, match="unidentified hotend"):
+        printer.gcode.run("T1")
+    printer.gcode.run("DD_SET_ACTIVE_TOOL TOOL=0")
+    assert den.get_status()['tool_state'] == 'attached'
+
+
+def test_tool_changes_without_dock_sensors(tmp_path, monkeypatch):
+    printer, den, buttons = make_sensored(tmp_path,
+                                          dock_sensors_enabled='False')
+    setup_tools(printer, den)
+    seat(buttons, toolhead=True)
+    assert den.get_status()['tool_state'] == 'attached'
+    real_dock, real_pick = den._dock_tool, den._pickup_tool
+
+    def dock(tool, *a, **k):
+        real_dock(tool, *a, **k)
+        buttons.press(TH_PIN, 0)
+
+    def pick(tool, *a, **k):
+        real_pick(tool, *a, **k)
+        buttons.press(TH_PIN, 1)
+    monkeypatch.setattr(den, '_dock_tool', dock)
+    monkeypatch.setattr(den, '_pickup_tool', pick)
+    printer.gcode.run("T2")
+    assert den.state.active_tool == 2
+    assert reload_state(tmp_path).active_tool == 2   # tracked in the nest
+    # A pickup that leaves the toolhead empty is still caught
+    monkeypatch.setattr(den, '_pickup_tool', real_pick)
+    with pytest.raises(CommandError, match="T0 was not picked up: the"
+                       " toolhead sensor reports no hotend"):
+        printer.gcode.run("T0")
+    # Restart: the active tool comes back from dragonsnest.cfg
+    seat(buttons, toolhead=True)
+    printer.gcode.run("DD_SET_ACTIVE_TOOL TOOL=0")
+    printer2, den2, buttons2 = make_sensored(
+        tmp_path, dock_sensors_enabled='False', ready=False)
+    seat(buttons2, toolhead=True)                   # MCU reports the pin
+    printer2.send_event("klippy:ready")             # then the startup check
+    assert den2.state.active_tool == 0
+    assert den2.get_status()['tool_state'] == 'attached'
+
+
+def test_set_config_sensor_options_persist(tmp_path):
+    import configparser
+    nest = tmp_path / "dragonsnest.cfg"
+    shutil.copy(TEMPLATE, str(nest))
+    printer, den = make(tmp_path, tool_count=3)
+    printer.gcode.run("DD_SET_CONFIG DOCK_SENSORS_ENABLED=False"
+                      " TOOLHEAD_SENSOR_PIN=^PG11"
+                      " DOCK_SENSOR_PIN_T0=^PG12"
+                      " DOCK_SENSOR_PIN_T1=!toolboard:PB5")
+    cp = configparser.ConfigParser(inline_comment_prefixes=('#',))
+    cp.read(str(nest))
+    section = dict(cp['dragons_den'])
+    assert section['dock_sensors_enabled'] == 'False'
+    assert section['toolhead_sensor_pin'] == '^PG11'
+    assert section['dock_sensor_pin_t0'] == '^PG12'
+    assert section['dock_sensor_pin_t1'] == '!toolboard:PB5'
+    # After a restart Klipper loads them: dock pins kept but not used
+    opts = dict(BASE_OPTIONS)
+    opts.update({k: v for k, v in section.items()})
+    printer2 = FakePrinter(str(tmp_path / "printer.cfg"))
+    den2 = dragons_den.load_config(FakeConfig(printer2, opts))
+    assert den2.dock_sensors_enabled is False
+    assert set(printer2.objects['buttons'].callbacks) == {'^PG11'}
+    # Turn them back on, clear a pin
+    printer.gcode.run("DD_SET_CONFIG DOCK_SENSORS_ENABLED=on"
+                      " DOCK_SENSOR_PIN_T1=none")
+    cp = configparser.ConfigParser(inline_comment_prefixes=('#',))
+    cp.read(str(nest))
+    assert cp['dragons_den']['dock_sensors_enabled'] == 'True'
+    assert 'dock_sensor_pin_t1' not in cp['dragons_den']
+
+
+@pytest.mark.parametrize("params", [
+    "DOCK_SENSORS_ENABLED=maybe", "TOOLHEAD_SENSOR_PIN=PG$1",
+    "DOCK_SENSOR_PIN_T0=a:b:c",
+])
+def test_set_config_rejects_bad_sensor_values(tmp_path, params):
+    printer, _ = make(tmp_path)
+    with pytest.raises(CommandError):
+        printer.gcode.run("DD_SET_CONFIG " + params)

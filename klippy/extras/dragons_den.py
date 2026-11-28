@@ -328,9 +328,15 @@ class DragonsDen:
         self._prompt_state = None   # mirror of the open prompt for the panel
         self.jog_step = 1.0
         self.restart_pending = False
+        self.pending_settings = {}  # saved by DD_SET_CONFIG, not yet loaded
         # Hardware sensors (all optional). Pins work like endstop/button
         # pins: triggered means a hotend is seated. "!" inverts, "^" pulls up.
         self.toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
+        # Builds without dock sensors set dock_sensors_enabled: False. The
+        # pin options are still read (Klipper rejects unread options) but
+        # not registered, so leftover pins do not need wiring.
+        self.dock_sensors_enabled = config.getboolean('dock_sensors_enabled',
+                                                      True)
         self.dock_sensor_pins = {}
         for tool in range(self.tool_count):
             pin = config.get('dock_sensor_pin_t%d' % (tool,), None)
@@ -345,12 +351,13 @@ class DragonsDen:
         self.detached = False          # tool lost unexpectedly mid-print
         self._changing = False         # a tool change is moving the tools
         self._ready = False
-        if self.toolhead_sensor_pin or self.dock_sensor_pins:
+        if self.toolhead_sensor_pin:
             buttons = self.printer.load_object(config, 'buttons')
-            if self.toolhead_sensor_pin:
-                self.toolhead_present = False
-                buttons.register_buttons([self.toolhead_sensor_pin],
-                                         self._toolhead_sensor_cb)
+            self.toolhead_present = False
+            buttons.register_buttons([self.toolhead_sensor_pin],
+                                     self._toolhead_sensor_cb)
+        if self.dock_sensors_enabled and self.dock_sensor_pins:
+            buttons = self.printer.load_object(config, 'buttons')
             for tool, pin in sorted(self.dock_sensor_pins.items()):
                 self.dock_present[tool] = False
                 buttons.register_buttons([pin], self._make_dock_cb(tool))
@@ -594,6 +601,12 @@ class DragonsDen:
             " run DD_SET_ACTIVE_TOOL." % (seen, "T%d" % cur if cur >= 0
                                           else "none"))
 
+    def _settings_status(self):
+        settings = {key: getattr(self, key) for key in SETTINGS}
+        for tool in range(self.tool_count):
+            settings[DOCK_PIN % (tool,)] = self.dock_sensor_pins.get(tool)
+        return settings
+
     def _sensor_status(self):
         return {'toolhead': self.toolhead_present,
                 'docks': {"T%d" % t: self.dock_present.get(t)
@@ -634,7 +647,8 @@ class DragonsDen:
             'prompt': self._prompt_state,
             'paper_reference': self.state.paper_ref_z is not None,
             'restart_pending': self.restart_pending,
-            'settings': {key: getattr(self, key) for key in SETTINGS},
+            'pending_settings': dict(self.pending_settings),
+            'settings': self._settings_status(),
             'nest_file': self.nest.path,
         }
 
@@ -1627,7 +1641,8 @@ class DragonsDen:
         config only at startup, so a RESTART is needed to apply them.
         Values with spaces or "=" can be quoted: CAMERA_URL="/a?b=c"."""
         values = {}
-        for key in SETTINGS:
+        keys = list(SETTINGS) + [DOCK_PIN % (t,) for t in range(MAX_TOOLS)]
+        for key in keys:
             raw = gcmd.get(key.upper(), None)
             if raw is None:
                 continue
@@ -1647,6 +1662,7 @@ class DragonsDen:
         except (IOError, OSError) as e:
             raise self._error("unable to write %s: %s" % (self.nest.path, e))
         self.restart_pending = True
+        self.pending_settings.update(values)
         self._respond("settings saved to %s (%s). RESTART Klipper to apply."
                       % (self.nest.path,
                          ", ".join("%s=%s" % (k, "unset" if v is None else v)
@@ -1665,6 +1681,9 @@ SETTINGS = {
     'clear_y_dist': {'kind': 'float', 'above': 0.},
     'front_dock_max_y': {'kind': 'float', 'optional': True},
     'probe_start_z': {'kind': 'float', 'above': 0.},
+    # sensors (dock_sensor_pin_t<n> are handled through DOCK_PIN)
+    'toolhead_sensor_pin': {'kind': 'pin', 'optional': True},
+    'dock_sensors_enabled': {'kind': 'bool'},
     # sexball
     'ball_od': {'kind': 'float', 'min': 0., 'probe': 'sexball'},
     'ball_center': {'kind': 'floats', 'count': (2, 3), 'optional': True,
@@ -1684,8 +1703,15 @@ SETTINGS = {
 }
 
 
+DOCK_PIN = "dock_sensor_pin_t%d"
+PIN_SPEC = {'kind': 'pin', 'optional': True}
+PIN_RE = re.compile(r"^[!^~]*[A-Za-z0-9_]+(:[A-Za-z0-9_]+)?$")
+BOOLS = {'true': True, '1': True, 'yes': True, 'on': True,
+         'false': False, '0': False, 'no': False, 'off': False}
+
+
 def _parse_setting(key, raw):
-    spec = SETTINGS[key]
+    spec = SETTINGS[key] if key in SETTINGS else PIN_SPEC
     kind = spec['kind']
     if spec.get('optional') and raw.lower() in ('', 'none'):
         return None
@@ -1702,17 +1728,27 @@ def _parse_setting(key, raw):
             value = raw.lower()
             if value not in spec['choices']:
                 raise ValueError(raw)
+        elif kind == 'bool':
+            value = BOOLS[raw.lower()]
+        elif kind == 'pin':
+            if not PIN_RE.match(raw):
+                raise ValueError(raw)
+            value = raw
         else:
             if not raw or '\n' in raw:
                 raise ValueError(raw)
             value = raw
-    except ValueError:
+    except (ValueError, KeyError):
         expect = ""
         if kind == 'floats':
             expect = " (expected %s comma separated numbers)" % (
                 " or ".join(str(c) for c in spec['count']),)
         elif kind == 'choice':
             expect = " (one of %s)" % (", ".join(spec['choices']),)
+        elif kind == 'bool':
+            expect = " (True or False)"
+        elif kind == 'pin':
+            expect = " (a pin name such as ^PG11 or toolboard:PB5)"
         raise ValueError("invalid %s '%s'%s" % (key, raw, expect))
     if 'min' in spec and value < spec['min']:
         raise ValueError("%s must be >= %s" % (key, spec['min']))

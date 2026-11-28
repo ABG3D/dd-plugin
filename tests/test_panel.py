@@ -32,7 +32,10 @@ def user_section(path):
 def test_status_exposes_settings(tmp_path):
     _, den = make(tmp_path, front_dock_max_y=40)
     s = den.get_status()['settings']
-    assert set(s) == set(dragons_den.SETTINGS)
+    assert set(s) == set(dragons_den.SETTINGS) | {'dock_sensor_pin_t0',
+                                                 'dock_sensor_pin_t1'}
+    assert s['dock_sensors_enabled'] is True
+    assert s['toolhead_sensor_pin'] is None
     assert {k: s[k] for k in ('tool_count', 'kinematics_type', 'probe_type',
                               'dock_x_travel', 'lock_retract_dist',
                               'clear_y_dist', 'ball_od', 'front_dock_max_y',
@@ -90,6 +93,8 @@ def test_save_settings_updates_dragonsnest(tmp_path):
     assert "#   Number of tools" in text               # comments kept
     assert reload_state(tmp_path).active_tool == 1    # state block kept
     assert den.get_status()['restart_pending'] is True
+    assert den.get_status()['pending_settings']['probe_type'] == 'sexball'
+    assert den.get_status()['pending_settings']['tool_count'] == 4
     # Running settings only change after a restart
     assert den.tool_count == 2
     # Clearing an optional value comments it out
@@ -408,6 +413,8 @@ def test_panel_page_has_all_controls():
         "tool-indicator", "sensor-badges", "Detached", "tool_state",
         "mainsail&key=uiSettings", "--v-theme-primary", "v-card", "v-btn",
         "/server/files/config/.theme/custom.css",
+        "Enable Dock Sensors", "DOCK_SENSORS_ENABLED=", "dock_sensor_pin_t",
+        "Active Tool Override", "override-tool",
     ]:
         assert needle in html, needle
     assert "DRAGONS_" not in html
