@@ -7,6 +7,7 @@ and each stepper counts MCU steps. Moving by hand with motors off changes only
 `phys`; commanded moves change all three; homing drives `phys` to the
 endstop, counts the travelled steps and resets `cmd_pos`.
 """
+import shlex
 import types
 
 SENTINEL = object()
@@ -27,6 +28,45 @@ class FakeReactor:
     def monotonic(self):
         self.now += 0.001
         return self.now
+
+    def register_callback(self, callback, waketime=None):
+        # Run at once: tests drive time explicitly
+        callback(self.monotonic())
+
+    def pause(self, waketime):
+        self.now = max(self.now, waketime)
+        return self.now
+
+
+class FakeButtons:
+    """Stands in for klippy/extras/buttons.py. press(pin, 1/0) simulates
+    the MCU reporting a pin change."""
+    def __init__(self, reactor):
+        self.reactor = reactor
+        self.callbacks = {}
+
+    def register_buttons(self, pins, callback):
+        for pin in pins:
+            self.callbacks[pin] = callback
+
+    def press(self, pin, state):
+        self.callbacks[pin](self.reactor.monotonic(), 1 if state else 0)
+
+
+class FakePrintStats:
+    def __init__(self):
+        self.state = 'standby'
+
+    def get_status(self, eventtime):
+        return {'state': self.state}
+
+
+class FakePauseResume:
+    def __init__(self):
+        self.pauses = 0
+
+    def send_pause_command(self):
+        self.pauses += 1
 
 
 class FakeConfig:
@@ -173,9 +213,10 @@ class FakeGCode:
 
     # Test convenience: run a command as if typed in the console
     run = run_script_from_command
+    run_script = run_script_from_command
 
     def _dispatch(self, line):
-        parts = line.split()
+        parts = shlex.split(line)
         cmd = parts[0].upper()
         params = {}
         for p in parts[1:]:
@@ -387,6 +428,21 @@ class FakePrinter:
         if default is SENTINEL:
             raise ConfigError("Unknown config object '%s'" % name)
         return default
+
+    def load_object(self, config, section):
+        if section == 'buttons':
+            if 'buttons' not in self.objects:
+                self.objects['buttons'] = FakeButtons(self.reactor)
+            return self.objects['buttons']
+        return self.lookup_object(section)
+
+    def add_print_stats(self):
+        self.objects['print_stats'] = FakePrintStats()
+        self.objects['pause_resume'] = FakePauseResume()
+        self.gcode.register_command(
+            'PAUSE', lambda gcmd: setattr(self.objects['print_stats'],
+                                          'state', 'paused'))
+        return self.objects['print_stats']
 
     def add_object(self, name, obj):
         self.objects[name] = obj

@@ -3,11 +3,13 @@
 Klipper plugin for the **Dragons Den** automated hotend changer (v0.0.1).
 
 - Tool changes `T0`..`Tn` with dock/undock kinematics and per-tool G-code offsets
-- `DRAGONS_CALIBRATE_DOCKS`: guided dock location calibration (fixed or floating gantry)
-- `DRAGONS_CALIBRATE_OFFSETS`: guided tool offset calibration with an **eddy** probe, a **sexball** (calibration ball) or a **USB camera**
+- `DD_CALIBRATE_DOCKS`: guided dock location calibration (fixed or floating gantry)
+- `DD_CALIBRATE_OFFSETS`: guided tool offset calibration with an **eddy** probe, a **sexball** (calibration ball) or a **USB camera**
 - Wizards run as native Klipper action prompts, so they work in **Mainsail and Fluidd** with no frontend changes
 - A **Dragons Den** entry in Mainsail's left sidebar opens a control panel for settings, calibration, tool changes and the USB camera view
+- Optional **toolhead and per-dock sensors**: the attached tool is detected automatically (also when you swap a hotend by hand), every dock and pickup is checked, and a hotend lost mid-print pauses the print
 - Dock coordinates, tool offsets and the active tool persist in `dragonsnest.cfg` across restarts
+- All commands use the `DD_` prefix (`DD_CALIBRATE_DOCKS`, `DD_STATUS`, `DD_SET_CONFIG`, ...)
 
 > **Status:** v0.0.1 has been tested against mocked Klipper objects only (`tests/`), not on a printer yet. Run the first tool changes slowly and keep a hand near the power switch.
 
@@ -43,6 +45,33 @@ The extruder stays on the shuttle; the hotend is what docks. For each dock the m
 The toolhead then returns to where it started, shifted by the new tool's offset, and the G-code state is restored with `SET_GCODE_OFFSET X_ADJUST/Y_ADJUST/Z_ADJUST`, so any Z babystepping is kept.
 
 If the extruder is below `min_extrude_temp`, the lock moves use `FORCE_MOVE` instead. That needs `enable_force_move: True` under `[force_move]`, or a hot hotend.
+
+## Toolhead and dock sensors
+
+Both kinds of sensor are optional and independent. Each is a switch read like an endstop or button: **triggered means a hotend is seated**. Prefix the pin with `!` to invert it and `^` to enable the pull-up.
+
+```ini
+[dragons_den]
+tool_count: 3
+toolhead_sensor_pin: ^PG11      # hotend seated on the toolhead
+dock_sensor_pin_t0: ^PG12       # T0 seated in its dock
+dock_sensor_pin_t1: ^PG13
+dock_sensor_pin_t2: ^toolboard:PB5
+#pause_on_detach: True          # PAUSE when a hotend is lost mid-print
+#detach_gcode:                  # extra G-code run when that happens
+#sensor_settle_time: 0.3        # seconds to let the pins report after a move
+```
+
+What the sensors do:
+
+- **Automatic tool detection.** Whenever a pin changes, the plugin works out the attached tool. If the toolhead sensor is triggered and exactly one dock reports empty, that tool is the active one. This also works when you put a hotend on by hand without a tool-change command: its G-code offset is applied and it is saved as the active tool. Taking a hotend off by hand (not printing) sets the active tool to none.
+- **Checked tool changes.** After docking, the toolhead must report empty and the tool's dock seated. After a pickup, the toolhead must report a hotend and the dock empty. Otherwise the command stops with an error, and the active tool keeps its last confirmed state. A tool change also refuses to start while the sensors contradict the active tool.
+- **Detachment while printing.** If the toolhead sensor opens during a print without a tool change, the plugin marks the tool **Detached**, reports it with `!!` in the console, shows a prompt and runs `PAUSE` plus `detach_gcode`. With `pause_on_detach: False`, only `detach_gcode` runs. Push the hotend back on: it is detected and the error clears. Then check the print and `RESUME`. `DD_SET_ACTIVE_TOOL` clears the error too.
+- During calibration wizards the plugin ignores sensor changes, because you swap tools by hand there. It re-checks the sensors when the wizard ends.
+
+`printer.dragons_den` reports `tool_state` (`attached`, `none`, `detached`, or `unknown` when the sensors can't identify the hotend or contradict the active tool), `detected_tool`, and `sensors` (`toolhead` and `docks.T0`..`Tn` as `true`/`false`, or `null` when no pin is configured).
+
+Without sensors, everything works as before: the active tool is whatever the last tool change or `DD_SET_ACTIVE_TOOL` set.
 
 ## Installation
 
@@ -87,7 +116,7 @@ probe_type: usb_camera             # or eddy / sexball
 
 If you include the file from a subfolder (`[include dragons/dragonsnest.cfg]`), also set `nest_file: ~/printer_data/config/dragons/dragonsnest.cfg`.
 
-If you already have `T0`, `T1`, ... macros, remove them or set `register_t_commands: False` and call `DRAGONS_SELECT_TOOL TOOL=n` from your own macros.
+If you already have `T0`, `T1`, ... macros, remove them or set `register_t_commands: False` and call `DD_SELECT_TOOL TOOL=n` from your own macros.
 
 ### 3. moonraker.conf
 
@@ -110,7 +139,9 @@ The panel and camera pages talk to Klipper through Moonraker's API. If Moonraker
 
 ### 4. Open the Dragons Den panel
 
-Reload Mainsail in the browser. A **Dragons Den** item with a nozzle icon appears in the left sidebar; it opens the control panel at `http://<printer>/server/dragons_den/panel` (the **← Mainsail** button returns to the dashboard). Mainsail loads `navi.json` and `custom.css` from `.theme`, but it does not run custom JavaScript, so the panel is its own page served by Moonraker rather than a view inside Mainsail.
+Reload Mainsail in the browser. A **Dragons Den** item with a nozzle icon appears in the left sidebar; it opens the control panel at `http://<printer>/server/dragons_den/panel` (the **← Mainsail** button returns to the dashboard). Mainsail loads `navi.json` and `custom.css` from `.theme`, but it does not run custom JavaScript (there is no `custom.js`), so the panel is its own page served by Moonraker rather than a view inside Mainsail.
+
+The panel has no colour scheme of its own. It uses Vuetify's theme variables (`--v-theme-*`) and class names (`v-card`, `v-btn`, `v-chip`), and fills the variables from Mainsail's saved UI settings: light or dark mode and your primary colour. It also loads your `.theme/custom.css`, so your own theme overrides apply. The sidebar entry adds no colours either.
 
 Fluidd has no sidebar extension mechanism. Open the panel URL directly, or use the same wizards there through Klipper's action prompts.
 
@@ -122,13 +153,14 @@ The panel polls Klipper once a second and sends every action as a G-code command
 |---|---|
 | **Wizard** (while one runs) | Mirrors the open action prompt: instructions, jog buttons, Accept/OK/Save, Cancel |
 | **Paper Z-Test (TESTZ)** (while Klipper's manual probe is active) | Current Z, `TESTZ` −1/−0.1/−0.05/−0.01 and +0.01/+0.05/+0.1/+1, Accept, Abort |
-| **Tool Control & Status** | `T0`..`Tn` quick select, Dock Active Tool, Home All, active tool, homed axes, position, dock and offset table, set the attached tool without motion |
+| **Attached Tool** | Large live indicator: `T0`..`Tn`, `None`, `Detached` or `Error` (sensors disagree), with badges for the toolhead sensor and every dock sensor (`seated`, `empty` or `n/a`) |
+| **Tool Control & Status** | `T0`..`Tn` quick select, Dock Active Tool, Home All, active tool, homed axes, position, dock sensor / dock / offset table, set the attached tool without motion |
 | **Dock Calibration** | Calibrate All Docks, Calibrate T0..Tn (one tool each), Test Slow Dock; shows the front-dock limit and `+Y` clearance |
-| **Offset Calibration** | Calibrate Offsets and Paper Z-Test for the selected tool; USB camera live view with centered crosshair and Z-focus circle, fine jog 0.01 / 0.05 / 0.1 / 1.0 mm, Save |
-| **Settings & Persistence** | `tool_count`, `kinematics_type`, `dock_x_travel`, `lock_retract_dist`, `clear_y_dist`, `probe_type`, `ball_od`, `front_dock_max_y`, and **Save to dragonsnest.cfg** |
+| **Offset Calibration** | Calibrate Offsets and Paper Z-Test for the selected tool, plus the controls of the running `probe_type` only: the USB camera live view (crosshair, Z-focus circle, 0.01 / 0.05 / 0.1 / 1.0 mm jog, Save), or the sexball or eddy instructions |
+| **Settings & Persistence** | Common options (`tool_count`, `kinematics_type`, `dock_x_travel`, `lock_retract_dist`, `clear_y_dist`, `front_dock_max_y`, `probe_start_z`, `probe_type`), then only the selected probe's options: sexball `ball_od`, `ball_center`, `ball_clearance`; eddy `eddy_xy_target`, `eddy_z_point`, `eddy_probe_method`; usb_camera `camera_position`, `camera_url`, `camera_circle_px`. **Save to dragonsnest.cfg** saves the visible fields only |
 | **Console** | Recent G-code responses |
 
-**Saving settings** writes the values into the `[dragons_den]` section of `dragonsnest.cfg` (`DRAGONS_SAVE_SETTINGS`). Existing lines are replaced, commented-out options are uncommented in place, comments and the state block are kept. Klipper reads its config only at startup, so the panel then shows a **Restart Klipper** button. The settings must live in `dragonsnest.cfg`; if you moved `[dragons_den]` into `printer.cfg`, edit them there instead.
+**Saving settings** writes the values into the `[dragons_den]` section of `dragonsnest.cfg` (`DD_SET_CONFIG`). Existing lines are replaced, commented-out options are uncommented in place, comments and the state block are kept. Klipper reads its config only at startup, so the panel then shows a **Restart Klipper** button. The settings must live in `dragonsnest.cfg`; if you moved `[dragons_den]` into `printer.cfg`, edit them there instead.
 
 ## Configuration reference
 
@@ -156,7 +188,12 @@ The panel polls Klipper once a second and sends every action as a G-code command
 | `camera_position` | (none) | usb_camera: estimated `x, y, z` with T0 over the lens |
 | `camera_url` | `/webcam/?action=stream` | usb_camera: MJPEG stream shown on the alignment page |
 | `camera_circle_px` | `60` | usb_camera: default focus circle radius (stream pixels) |
-| `paper_test_point` | bed center | Bed spot `x, y` for `DRAGONS_PAPER_TEST` |
+| `paper_test_point` | bed center | Bed spot `x, y` for `DD_PAPER_TEST` |
+| `toolhead_sensor_pin` | (none) | Switch that is triggered while a hotend is seated on the toolhead |
+| `dock_sensor_pin_t0` .. `dock_sensor_pin_t<n-1>` | (none) | Switch that is triggered while that tool is seated in its dock |
+| `pause_on_detach` | `True` | `PAUSE` when the toolhead loses its hotend during a print |
+| `detach_gcode` | (none) | Extra G-code run when a hotend is lost during a print |
+| `sensor_settle_time` | `0.3` | Seconds to wait for the sensor pins after a dock or pickup before checking them |
 | `nest_file` | next to `printer.cfg` | Path of `dragonsnest.cfg` |
 
 ## Persistence (`dragonsnest.cfg`)
@@ -180,7 +217,7 @@ Each line starts with `#`, so Klipper reads it as a comment. The plugin writes t
 
 Home and test basic motion before you start. Calibrate docks first, then offsets.
 
-### 1. Dock locations: `DRAGONS_CALIBRATE_DOCKS`
+### 1. Dock locations: `DD_CALIBRATE_DOCKS`
 
 A prompt opens for each tool, starting at T0 (`TOOL=n` starts at another tool):
 
@@ -193,9 +230,9 @@ A prompt opens for each tool, starting at T0 (`TOOL=n` starts at another tool):
    - **No:** dock the tool by hand.
 5. Attach the next tool and press **Continue**.
 
-### 2. Tool offsets: `DRAGONS_CALIBRATE_OFFSETS`
+### 2. Tool offsets: `DD_CALIBRATE_OFFSETS`
 
-Run without arguments to pick a tool, or use `DRAGONS_CALIBRATE_OFFSETS TOOL=n`. T0 is measured first as the reference. Later single-tool runs reuse the stored T0 reference until you change `probe_type`. If docks are calibrated and the printer is homed, tools are swapped automatically. Otherwise the wizard asks you to swap by hand.
+Run without arguments to pick a tool, or use `DD_CALIBRATE_OFFSETS TOOL=n`. T0 is measured first as the reference. Later single-tool runs reuse the stored T0 reference until you change `probe_type`. If docks are calibrated and the printer is homed, tools are swapped automatically. Otherwise the wizard asks you to swap by hand.
 
 **sexball**
 1. Set `ball_od` (calipers) and `ball_center` in `[dragons_den]`.
@@ -216,27 +253,29 @@ Run without arguments to pick a tool, or use `DRAGONS_CALIBRATE_OFFSETS TOOL=n`.
 
 The printer prompt shows the same jog and Save controls if you'd rather stay in Mainsail/Fluidd.
 
-**Paper Z-Test (`DRAGONS_PAPER_TEST`)** measures only a tool's Z offset, with Klipper's manual probe at `paper_test_point`. Run it for T0 first; that result is the Z reference. Each later tool then gets `offset_z = z(Ti) - z(T0)`, while its X/Y offsets stay as they were. Every nozzle tests the same bed spot, because the tool's XY offset is applied when moving there.
+**Paper Z-Test (`DD_PAPER_TEST`)** measures only a tool's Z offset, with Klipper's manual probe at `paper_test_point`. Run it for T0 first; that result is the Z reference. Each later tool then gets `offset_z = z(Ti) - z(T0)`, while its X/Y offsets stay as they were. Every nozzle tests the same bed spot, because the tool's XY offset is applied when moving there.
 
 ## G-code commands
 
 | Command | Description |
 |---|---|
 | `T0`..`Tn` | Change tool |
-| `DRAGONS_SELECT_TOOL TOOL=n` | Change tool; `TOOL=-1` parks the active tool |
-| `DRAGONS_SET_ACTIVE_TOOL TOOL=n` | Tell the plugin which tool is attached (no motion; `-1` = none) |
-| `DRAGONS_SET_OFFSET TOOL=n [X=] [Y=] [Z=]` | Set an offset by hand |
-| `DRAGONS_CALIBRATE_DOCKS [TOOL=n] [SINGLE=1]` | Dock calibration wizard; `SINGLE=1` calibrates only `TOOL` |
-| `DRAGONS_TEST_DOCK` | Slowly dock the active tool (`verify_speed`, front dock, `+Y` clearance) |
-| `DRAGONS_CALIBRATE_OFFSETS [TOOL=n]` | Offset calibration wizard |
-| `DRAGONS_PAPER_TEST [TOOL=n]` | Z-only offset by manual paper test (T0 first) |
-| `DRAGONS_CAMERA_SAVE` | Save during usb_camera calibration |
-| `DRAGONS_SAVE_SETTINGS [TOOL_COUNT=] [KINEMATICS_TYPE=] [PROBE_TYPE=] [DOCK_X_TRAVEL=] [LOCK_RETRACT_DIST=] [CLEAR_Y_DIST=] [BALL_OD=] [FRONT_DOCK_MAX_Y=]` | Write settings to `dragonsnest.cfg` (restart to apply; `FRONT_DOCK_MAX_Y=none` unsets) |
-| `DRAGONS_JOG [X=] [Y=] [Z=]` / `DRAGONS_JOG_STEP STEP=` | Wizard jogging |
-| `DRAGONS_STATUS` | Print docks, offsets and active tool |
-| `DRAGONS_ABORT` | Close the running wizard |
+| `DD_SELECT_TOOL TOOL=n` | Change tool; `TOOL=-1` parks the active tool |
+| `DD_SET_ACTIVE_TOOL TOOL=n` | Tell the plugin which tool is attached (no motion; `-1` = none); also clears a detached-tool error |
+| `DD_SET_OFFSET TOOL=n [X=] [Y=] [Z=]` | Set an offset by hand |
+| `DD_CALIBRATE_DOCKS [TOOL=n] [SINGLE=1]` | Dock calibration wizard; `SINGLE=1` calibrates only `TOOL` |
+| `DD_TEST_DOCK` | Slowly dock the active tool (`verify_speed`, front dock, `+Y` clearance) |
+| `DD_CALIBRATE_OFFSETS [TOOL=n]` | Offset calibration wizard |
+| `DD_PAPER_TEST [TOOL=n]` | Z-only offset by manual paper test (T0 first) |
+| `DD_CAMERA_SAVE` | Save during usb_camera calibration |
+| `DD_SET_CONFIG [OPTION=value ...]` | Write `[dragons_den]` options to `dragonsnest.cfg` (restart to apply). Accepts every option in the Settings card, e.g. `DD_SET_CONFIG PROBE_TYPE=eddy EDDY_XY_TARGET=120,130 CAMERA_URL="/webcam/?action=stream"`. `=none` unsets an optional value |
+| `DD_JOG [X=] [Y=] [Z=]` / `DD_JOG_STEP STEP=` | Wizard jogging |
+| `DD_STATUS` | Print docks, offsets, active tool and sensor states |
+| `DD_ABORT` | Close the running wizard |
 
-The plugin's state is also available to macros and the UI as `printer.dragons_den` (`active_tool`, `docks`, `offsets`, `wizard`, ...).
+The plugin's state is also available to macros and the UI as `printer.dragons_den` (`active_tool`, `tool_state`, `sensors`, `docks`, `offsets`, `wizard`, ...).
+
+**Renamed in this version:** all commands used to start with `DRAGONS_`. Replace `DRAGONS_` with `DD_` in your macros; `DRAGONS_SAVE_SETTINGS` is now `DD_SET_CONFIG`.
 
 ## Development
 
@@ -252,6 +291,7 @@ The tests mock Klipper's `printer`, `gcode`, `toolhead` (with step-counting step
 - fixed and floating gantry dock calibration, the front-dock limit and `+Y` clearance
 - all three offset modes and the paper Z-test
 - tool change kinematics and test docking
+- toolhead and dock sensors: hand-attachment detection, ambiguous states, checked docks and pickups, detachment mid-print
 - `dragonsnest.cfg` persistence and settings saving
 - the panel's prompt mirroring
 - the Mainsail sidebar merge and `install.sh`

@@ -328,37 +328,65 @@ class DragonsDen:
         self._prompt_state = None   # mirror of the open prompt for the panel
         self.jog_step = 1.0
         self.restart_pending = False
+        # Hardware sensors (all optional). Pins work like endstop/button
+        # pins: triggered means a hotend is seated. "!" inverts, "^" pulls up.
+        self.toolhead_sensor_pin = config.get('toolhead_sensor_pin', None)
+        self.dock_sensor_pins = {}
+        for tool in range(self.tool_count):
+            pin = config.get('dock_sensor_pin_t%d' % (tool,), None)
+            if pin:
+                self.dock_sensor_pins[tool] = pin
+        self.pause_on_detach = config.getboolean('pause_on_detach', True)
+        self.detach_gcode = config.get('detach_gcode', '')
+        self.sensor_settle_time = config.getfloat('sensor_settle_time', 0.3,
+                                                  minval=0.)
+        self.toolhead_present = None   # None: no toolhead sensor
+        self.dock_present = {}         # tool -> bool, only sensed docks
+        self.detached = False          # tool lost unexpectedly mid-print
+        self._changing = False         # a tool change is moving the tools
+        self._ready = False
+        if self.toolhead_sensor_pin or self.dock_sensor_pins:
+            buttons = self.printer.load_object(config, 'buttons')
+            if self.toolhead_sensor_pin:
+                self.toolhead_present = False
+                buttons.register_buttons([self.toolhead_sensor_pin],
+                                         self._toolhead_sensor_cb)
+            for tool, pin in sorted(self.dock_sensor_pins.items()):
+                self.dock_present[tool] = False
+                buttons.register_buttons([pin], self._make_dock_cb(tool))
         # Events and commands
         self.printer.register_event_handler("klippy:connect",
                                             self._handle_connect)
+        self.printer.register_event_handler("klippy:ready",
+                                            self._handle_ready)
         cmds = [
-            ('DRAGONS_SELECT_TOOL', self.cmd_DRAGONS_SELECT_TOOL,
+            ('DD_SELECT_TOOL', self.cmd_DD_SELECT_TOOL,
              "Dock the active tool and pick up TOOL (-1 parks only)"),
-            ('DRAGONS_SET_ACTIVE_TOOL', self.cmd_DRAGONS_SET_ACTIVE_TOOL,
+            ('DD_SET_ACTIVE_TOOL', self.cmd_DD_SET_ACTIVE_TOOL,
              "Tell Dragons Den which tool is attached (no motion)"),
-            ('DRAGONS_SET_OFFSET', self.cmd_DRAGONS_SET_OFFSET,
+            ('DD_SET_OFFSET', self.cmd_DD_SET_OFFSET,
              "Manually set a tool offset relative to T0"),
-            ('DRAGONS_CALIBRATE_DOCKS', self.cmd_DRAGONS_CALIBRATE_DOCKS,
+            ('DD_CALIBRATE_DOCKS', self.cmd_DD_CALIBRATE_DOCKS,
              "Start the dock location calibration wizard"),
-            ('DRAGONS_CALIBRATE_OFFSETS', self.cmd_DRAGONS_CALIBRATE_OFFSETS,
+            ('DD_CALIBRATE_OFFSETS', self.cmd_DD_CALIBRATE_OFFSETS,
              "Start the tool offset calibration wizard"),
-            ('DRAGONS_JOG', self.cmd_DRAGONS_JOG,
+            ('DD_JOG', self.cmd_DD_JOG,
              "Relative jog used by the Dragons Den wizards"),
-            ('DRAGONS_JOG_STEP', self.cmd_DRAGONS_JOG_STEP,
+            ('DD_JOG_STEP', self.cmd_DD_JOG_STEP,
              "Set the wizard jog step in mm"),
-            ('DRAGONS_RESPOND', self.cmd_DRAGONS_RESPOND,
+            ('DD_RESPOND', self.cmd_DD_RESPOND,
              "Button handler for Dragons Den prompts"),
-            ('DRAGONS_CAMERA_SAVE', self.cmd_DRAGONS_CAMERA_SAVE,
+            ('DD_CAMERA_SAVE', self.cmd_DD_CAMERA_SAVE,
              "Save the current tool position in usb_camera calibration"),
-            ('DRAGONS_ABORT', self.cmd_DRAGONS_ABORT,
+            ('DD_ABORT', self.cmd_DD_ABORT,
              "Abort the running Dragons Den wizard"),
-            ('DRAGONS_STATUS', self.cmd_DRAGONS_STATUS,
+            ('DD_STATUS', self.cmd_DD_STATUS,
              "Report Dragons Den docks, offsets and active tool"),
-            ('DRAGONS_TEST_DOCK', self.cmd_DRAGONS_TEST_DOCK,
+            ('DD_TEST_DOCK', self.cmd_DD_TEST_DOCK,
              "Slowly dock the active tool to verify its dock position"),
-            ('DRAGONS_PAPER_TEST', self.cmd_DRAGONS_PAPER_TEST,
+            ('DD_PAPER_TEST', self.cmd_DD_PAPER_TEST,
              "Measure a tool's Z offset with a manual paper test"),
-            ('DRAGONS_SAVE_SETTINGS', self.cmd_DRAGONS_SAVE_SETTINGS,
+            ('DD_SET_CONFIG', self.cmd_DD_SET_CONFIG,
              "Write [dragons_den] settings to dragonsnest.cfg"),
         ]
         for name, func, desc in cmds:
@@ -372,10 +400,204 @@ class DragonsDen:
     def _handle_connect(self):
         self.toolhead = self.printer.lookup_object('toolhead')
 
+    def _handle_ready(self):
+        self._ready = True
+        if self.toolhead_present is not None:
+            # Give the MCU a moment to report the initial pin states
+            self.reactor.register_callback(self._sensor_event,
+                                           self.reactor.monotonic() + 1.)
+
     def _make_tool_cmd(self, tool):
         def cmd(gcmd):
             self.change_tool(tool)
         return cmd
+
+    ##################################################################
+    # Toolhead / dock sensors and automatic tool detection
+    ##################################################################
+
+    def _toolhead_sensor_cb(self, eventtime, state):
+        self.toolhead_present = bool(state)
+        self._sensor_changed()
+
+    def _make_dock_cb(self, tool):
+        def cb(eventtime, state):
+            self.dock_present[tool] = bool(state)
+            self._sensor_changed()
+        return cb
+
+    def _sensor_changed(self):
+        if self._ready:
+            self.reactor.register_callback(self._sensor_event)
+
+    def _sensor_tool(self):
+        """What the sensors say is on the toolhead.
+
+        Returns None without a toolhead sensor, ('none', -1) when the
+        toolhead is empty, ('attached', T) when the tool is known and
+        ('unknown', -1) when a hotend is seated but the dock sensors cannot
+        tell which one. A seated hotend is identified as the only sensed
+        dock that is empty; otherwise the active tool is kept if the dock
+        sensors do not contradict it."""
+        if self.toolhead_present is None:
+            return None
+        if not self.toolhead_present:
+            return ('none', -1)
+        empty = [t for t, seated in sorted(self.dock_present.items())
+                 if not seated]
+        if len(empty) == 1:
+            return ('attached', empty[0])
+        cur = self.state.active_tool
+        if cur >= 0 and (cur in empty or cur not in self.dock_present):
+            return ('attached', cur)
+        return ('unknown', -1)
+
+    def _tool_state(self):
+        """attached | none | detached | unknown (sensors disagree)"""
+        if self.detached:
+            return 'detached'
+        cur = self.state.active_tool
+        res = self._sensor_tool()
+        if res is not None and not self._changing and (
+                res[0] == 'unknown' or res[1] != cur):
+            return 'unknown'
+        return 'attached' if cur >= 0 else 'none'
+
+    def _is_printing(self):
+        now = self.reactor.monotonic()
+        stats = self.printer.lookup_object('print_stats', None)
+        if stats is not None:
+            return stats.get_status(now).get('state') == 'printing'
+        idle = self.printer.lookup_object('idle_timeout', None)
+        return idle is not None and \
+            idle.get_status(now).get('state') == 'Printing'
+
+    def _sensor_event(self, eventtime=None):
+        """Re-evaluate the sensors (reactor callback, not a G-code command).
+
+        Tool changes and wizards move tools on purpose, so they are left
+        alone; their own checks run when they finish."""
+        if not self._ready or self._changing or self._wizard is not None:
+            return
+        try:
+            res = self._sensor_tool()
+            if res is None:
+                return
+            kind, tool = res
+            cur = self.state.active_tool
+            if kind == 'none':
+                if cur < 0 or self.detached:
+                    return
+                if self._is_printing():
+                    self._handle_detach(cur)
+                else:
+                    self._adopt_tool(-1, "T%d removed from the toolhead"
+                                     % (cur,))
+            elif kind == 'attached':
+                was_detached = self.detached
+                self.detached = False
+                if tool != cur:
+                    self._adopt_tool(tool, "T%d detected on the toolhead"
+                                     % (tool,))
+                elif was_detached:
+                    self._respond("T%d re-attached" % (tool,))
+        except Exception:
+            logging.exception("dragons_den: sensor handling failed")
+
+    def _adopt_tool(self, tool, message):
+        """Record a tool attached or removed by hand and move the G-code
+        offset from the old tool's offset to the new one's (no motion)."""
+        old = self.state.offset(self.state.active_tool)
+        new = self.state.offset(tool)
+        self.state.active_tool = tool
+        self._save()
+        delta = [n - o for n, o in zip(new, old)]
+        if any(delta):
+            self.gcode.run_script(
+                "SET_GCODE_OFFSET X_ADJUST=%.6f Y_ADJUST=%.6f Z_ADJUST=%.6f"
+                " MOVE=0" % tuple(delta))
+        self._respond(message)
+
+    def _handle_detach(self, tool):
+        self.detached = True
+        msg = "T%d detached from the toolhead!" % (tool,)
+        self.gcode.respond_raw("!! Dragons Den: " + msg)
+        self._prompt("Dragons Den: tool detached", [
+            ('text', msg + (" The print is paused." if self.pause_on_detach
+                            else "")),
+            ('text', "Re-attach T%d by hand (it is detected automatically),"
+                     " check the print, then RESUME." % (tool,))],
+            footer=[("Close", self._action('close'), "primary")])
+        script = self.detach_gcode.strip()
+        if self.pause_on_detach:
+            pause_resume = self.printer.lookup_object('pause_resume', None)
+            if pause_resume is not None:
+                pause_resume.send_pause_command()
+            script = "PAUSE" + ("\n" + script if script else "")
+        if script:
+            self.gcode.run_script(script)
+
+    def _settle(self):
+        """Wait for the moves to finish and the sensor pins to report."""
+        self.toolhead.wait_moves()
+        if self.sensor_settle_time:
+            self.reactor.pause(self.reactor.monotonic()
+                               + self.sensor_settle_time)
+
+    def _has_sensors(self, tool):
+        return self.toolhead_present is not None or tool in self.dock_present
+
+    def _verify_docked(self, tool):
+        if not self._has_sensors(tool):
+            return
+        self._settle()
+        problems = []
+        if self.toolhead_present:
+            problems.append("the toolhead sensor still reports a hotend")
+        if self.dock_present.get(tool) is False:
+            problems.append("the T%d dock sensor reports empty" % (tool,))
+        if problems:
+            raise self._error(
+                "T%d did not dock: %s. Check the tool by hand, then run"
+                " DD_SET_ACTIVE_TOOL." % (tool, " and ".join(problems)))
+
+    def _verify_attached(self, tool):
+        if not self._has_sensors(tool):
+            return
+        self._settle()
+        problems = []
+        if self.toolhead_present is False:
+            problems.append("the toolhead sensor reports no hotend")
+        if self.dock_present.get(tool):
+            problems.append("T%d is still in its dock" % (tool,))
+        if problems:
+            raise self._error(
+                "T%d was not picked up: %s. Check the tool by hand, then run"
+                " DD_SET_ACTIVE_TOOL." % (tool, " and ".join(problems)))
+
+    def _check_sensors_agree(self):
+        if self.detached:
+            raise self._error(
+                "T%d detached from the toolhead. Re-attach it by hand (it is"
+                " detected automatically) or run DD_SET_ACTIVE_TOOL."
+                % (self.state.active_tool,))
+        res = self._sensor_tool()
+        if res is None or (res[0] != 'unknown'
+                           and res[1] == self.state.active_tool):
+            return
+        cur = self.state.active_tool
+        seen = {'none': "no hotend on the toolhead",
+                'unknown': "an unidentified hotend on the toolhead",
+                'attached': "T%d on the toolhead" % (res[1],)}[res[0]]
+        raise self._error(
+            "sensors report %s but the active tool is %s. Fix it by hand or"
+            " run DD_SET_ACTIVE_TOOL." % (seen, "T%d" % cur if cur >= 0
+                                          else "none"))
+
+    def _sensor_status(self):
+        return {'toolhead': self.toolhead_present,
+                'docks': {"T%d" % t: self.dock_present.get(t)
+                          for t in range(self.tool_count)}}
 
     ##################################################################
     # Status
@@ -391,10 +613,14 @@ class DragonsDen:
             if tool == 0 or tool in self.state.offsets:
                 o = self.state.offset(tool)
                 offsets["T%d" % tool] = {'x': o[0], 'y': o[1], 'z': o[2]}
+        detected = self._sensor_tool()
         return {
             'version': VERSION,
             'tool_count': self.tool_count,
             'active_tool': self.state.active_tool,
+            'tool_state': self._tool_state(),
+            'detected_tool': None if detected is None else detected[1],
+            'sensors': self._sensor_status(),
             'kinematics_type': self.kinematics_type,
             'probe_type': self.probe_type,
             'docks': docks,
@@ -408,16 +634,7 @@ class DragonsDen:
             'prompt': self._prompt_state,
             'paper_reference': self.state.paper_ref_z is not None,
             'restart_pending': self.restart_pending,
-            'settings': {
-                'tool_count': self.tool_count,
-                'kinematics_type': self.kinematics_type,
-                'probe_type': self.probe_type,
-                'dock_x_travel': self.dock_x_travel,
-                'lock_retract_dist': self.lock_retract_dist,
-                'clear_y_dist': self.clear_y_dist,
-                'ball_od': self.ball_od,
-                'front_dock_max_y': self.front_dock_max_y,
-            },
+            'settings': {key: getattr(self, key) for key in SETTINGS},
             'nest_file': self.nest.path,
         }
 
@@ -464,7 +681,7 @@ class DragonsDen:
     def _require_dock(self, tool):
         if tool not in self.state.docks:
             raise self._error("dock for T%d is not calibrated"
-                              " (run DRAGONS_CALIBRATE_DOCKS)" % (tool,))
+                              " (run DD_CALIBRATE_DOCKS)" % (tool,))
         self._check_front_dock(tool, self.state.docks[tool][1])
 
     def _front_dock_limit(self):
@@ -485,7 +702,7 @@ class DragonsDen:
         raise self._error(
             "T%d dock Y=%.3f is not on the front dock bar (must be %s %.3f)."
             " Docks must be front-mounted at low Y; recalibrate with"
-            " DRAGONS_CALIBRATE_DOCKS%s." % (
+            " DD_CALIBRATE_DOCKS%s." % (
                 tool, dock_y, "<=" if inclusive else "<", limit,
                 "" if inclusive else " or set front_dock_max_y"))
 
@@ -645,6 +862,7 @@ class DragonsDen:
     def change_tool(self, target):
         self._check_tool(target, allow_none=True)
         current = self.state.active_tool
+        self._check_sensors_agree()
         if target == current:
             self._respond("T%d already active" % (target,) if target >= 0
                           else "no tool attached")
@@ -663,16 +881,22 @@ class DragonsDen:
         start = th.get_position()
         safe_z = min(start[2] + self.z_hop, self._max_z())
         self._move(z=safe_z, speed=self.z_speed)
-        if current >= 0:
-            self._dock_tool(current, self.dock_speed, self.travel_speed,
-                            return_z=safe_z)
-            self.state.active_tool = -1
-            self._save()
-        if target >= 0:
-            self._pickup_tool(target, self.dock_speed, self.travel_speed,
-                              return_z=safe_z)
-            self.state.active_tool = target
-            self._save()
+        self._changing = True
+        try:
+            if current >= 0:
+                self._dock_tool(current, self.dock_speed, self.travel_speed,
+                                return_z=safe_z)
+                self._verify_docked(current)
+                self.state.active_tool = -1
+                self._save()
+            if target >= 0:
+                self._pickup_tool(target, self.dock_speed, self.travel_speed,
+                                  return_z=safe_z)
+                self._verify_attached(target)
+                self.state.active_tool = target
+                self._save()
+        finally:
+            self._changing = False
         old = self.state.offset(current)
         new = self.state.offset(target)
         delta = [n - o for n, o in zip(new, old)]
@@ -733,7 +957,7 @@ class DragonsDen:
     def _action(name, **params):
         extra = "".join(" %s=%s" % (k.upper(), v)
                         for k, v in sorted(params.items()))
-        return "DRAGONS_RESPOND ACTION=%s%s" % (name, extra)
+        return "DD_RESPOND ACTION=%s%s" % (name, extra)
 
     def _cancel_button(self):
         return ("Cancel", self._action('cancel'), "error")
@@ -749,13 +973,13 @@ class DragonsDen:
         step = _num(self.jog_step)
         items = [('text', "Jog step %s mm (Z+ moves the nozzle away from"
                           " the bed)" % (step,)),
-                 ('group', [(_num(s), "DRAGONS_JOG_STEP STEP=%s" % _num(s),
+                 ('group', [(_num(s), "DD_JOG_STEP STEP=%s" % _num(s),
                              "primary" if s == self.jog_step else "secondary")
                             for s in JOG_STEPS])]
         for axis in "XY" + ("Z" if allow_z else ""):
             items.append(('group', [
-                ("%s-" % axis, "DRAGONS_JOG %s=-%s" % (axis, step), "info"),
-                ("%s+" % axis, "DRAGONS_JOG %s=%s" % (axis, step), "info")]))
+                ("%s-" % axis, "DD_JOG %s=-%s" % (axis, step), "info"),
+                ("%s+" % axis, "DD_JOG %s=%s" % (axis, step), "info")]))
         return items
 
     def _render(self):
@@ -772,6 +996,8 @@ class DragonsDen:
         self._close_prompt()
         if message:
             self._respond(message)
+        # Tools may have been swapped by hand during the wizard
+        self._sensor_changed()
 
     ##################################################################
     # Jogging
@@ -788,7 +1014,7 @@ class DragonsDen:
             return "xyz"
         return ""
 
-    def cmd_DRAGONS_JOG(self, gcmd):
+    def cmd_DD_JOG(self, gcmd):
         delta = [gcmd.get_float(a.upper(), 0.) for a in AXES]
         axes = "".join(a for a, d in zip(AXES, delta) if d)
         if not axes:
@@ -806,7 +1032,7 @@ class DragonsDen:
             [p + d if d else None for p, d in zip(pos[:3], delta)], speed)
         self._render()
 
-    def cmd_DRAGONS_JOG_STEP(self, gcmd):
+    def cmd_DD_JOG_STEP(self, gcmd):
         self.jog_step = gcmd.get_float('STEP', above=0., maxval=50.)
         self._render()
 
@@ -814,18 +1040,19 @@ class DragonsDen:
     # Simple commands
     ##################################################################
 
-    def cmd_DRAGONS_SELECT_TOOL(self, gcmd):
+    def cmd_DD_SELECT_TOOL(self, gcmd):
         self.change_tool(gcmd.get_int('TOOL', minval=-1))
 
-    def cmd_DRAGONS_SET_ACTIVE_TOOL(self, gcmd):
+    def cmd_DD_SET_ACTIVE_TOOL(self, gcmd):
         tool = gcmd.get_int('TOOL', minval=-1)
         self._check_tool(tool, allow_none=True)
         self.state.active_tool = tool
+        self.detached = False
         self._save()
         self._respond("active tool set to %s"
                       % ("T%d" % tool if tool >= 0 else "none",))
 
-    def cmd_DRAGONS_SET_OFFSET(self, gcmd):
+    def cmd_DD_SET_OFFSET(self, gcmd):
         tool = gcmd.get_int('TOOL', minval=1)
         self._check_tool(tool)
         cur = self.state.offset(tool)
@@ -835,7 +1062,7 @@ class DragonsDen:
         self._respond("T%d offset %s" % (tool,
                                          _xyz(self.state.offsets[tool])))
 
-    def cmd_DRAGONS_STATUS(self, gcmd):
+    def cmd_DD_STATUS(self, gcmd):
         lines = ["Dragons Den v%s: %s, probe %s, active %s" % (
             VERSION, self.kinematics_type, self.probe_type,
             "T%d" % self.state.active_tool if self.state.active_tool >= 0
@@ -849,12 +1076,20 @@ class DragonsDen:
                 _xyz(self.state.offsets[tool]) if tool in self.state.offsets
                 else "not calibrated")
             lines.append("T%d dock: %s | offset: %s" % (tool, dock_s, off_s))
+        if self.toolhead_present is not None or self.dock_present:
+            def pin(v):
+                return "n/a" if v is None else ("seated" if v else "empty")
+            lines.append("Sensors: toolhead %s | %s | state %s" % (
+                pin(self.toolhead_present),
+                " ".join("T%d dock %s" % (t, pin(self.dock_present.get(t)))
+                         for t in range(self.tool_count)),
+                self._tool_state()))
         gcmd.respond_info("\n".join(lines))
 
-    def cmd_DRAGONS_ABORT(self, gcmd):
+    def cmd_DD_ABORT(self, gcmd):
         self._end_wizard("calibration aborted")
 
-    def cmd_DRAGONS_RESPOND(self, gcmd):
+    def cmd_DD_RESPOND(self, gcmd):
         action = gcmd.get('ACTION').lower()
         if action in ('cancel', 'close'):
             self._end_wizard("calibration cancelled" if action == 'cancel'
@@ -882,7 +1117,7 @@ class DragonsDen:
     # Dock calibration wizard
     ##################################################################
 
-    def cmd_DRAGONS_CALIBRATE_DOCKS(self, gcmd):
+    def cmd_DD_CALIBRATE_DOCKS(self, gcmd):
         start = gcmd.get_int('TOOL', 0, minval=0, maxval=self.tool_count - 1)
         single = gcmd.get_int('SINGLE', 0, minval=0, maxval=1) == 1
         self._wizard = {'kind': 'docks', 'step': 'position', 'tool': start,
@@ -990,7 +1225,12 @@ class DragonsDen:
             w['step'] = 'verify'
         elif step == 'verify' and action == 'verify_yes':
             self._require_homed("xyz" if self.floating else "xy")
-            self._dock_tool(tool, self.verify_speed, self.verify_speed)
+            self._changing = True
+            try:
+                self._dock_tool(tool, self.verify_speed, self.verify_speed)
+                self._verify_docked(tool)
+            finally:
+                self._changing = False
             self.state.active_tool = -1
             self._save()
             w['verified'] = True
@@ -1029,7 +1269,7 @@ class DragonsDen:
             return [0, tool]
         return [tool]
 
-    def cmd_DRAGONS_CALIBRATE_OFFSETS(self, gcmd):
+    def cmd_DD_CALIBRATE_OFFSETS(self, gcmd):
         if self.probe_type == 'eddy' and \
                 self.printer.lookup_object('probe', None) is None:
             raise gcmd.error("Dragons Den: probe_type eddy needs a configured"
@@ -1260,7 +1500,7 @@ class DragonsDen:
         self._lift(self.z_hop)
         self._offsets_next(gcmd)
 
-    def cmd_DRAGONS_CAMERA_SAVE(self, gcmd):
+    def cmd_DD_CAMERA_SAVE(self, gcmd):
         w = self._wizard
         if w is None or w['kind'] != 'offsets' or w['step'] != 'camera':
             raise gcmd.error("Dragons Den: no usb_camera calibration is"
@@ -1296,7 +1536,7 @@ class DragonsDen:
     # Test dock, paper Z-test, settings (used by the Dragons Den panel)
     ##################################################################
 
-    def cmd_DRAGONS_TEST_DOCK(self, gcmd):
+    def cmd_DD_TEST_DOCK(self, gcmd):
         """Dock the active tool at verify_speed (front dock, +Y clearance)."""
         tool = self.state.active_tool
         if tool < 0:
@@ -1307,7 +1547,14 @@ class DragonsDen:
         if 'z' in self._homed_axes():
             self._lift(self.z_hop)
             return_z = self.toolhead.get_position()[2]
-        self._dock_tool(tool, self.verify_speed, self.verify_speed, return_z)
+        self._check_sensors_agree()
+        self._changing = True
+        try:
+            self._dock_tool(tool, self.verify_speed, self.verify_speed,
+                            return_z)
+            self._verify_docked(tool)
+        finally:
+            self._changing = False
         self.state.active_tool = -1
         self._save()
         off = self.state.offset(tool)
@@ -1322,7 +1569,7 @@ class DragonsDen:
         mins, maxs = status['axis_minimum'], status['axis_maximum']
         return [(mins[0] + maxs[0]) / 2., (mins[1] + maxs[1]) / 2.]
 
-    def cmd_DRAGONS_PAPER_TEST(self, gcmd):
+    def cmd_DD_PAPER_TEST(self, gcmd):
         """Z-only offset: paper test with the manual probe at one bed spot.
         T0 sets the reference; other tools get offset_z = z - z(T0)."""
         if manual_probe is None:
@@ -1333,7 +1580,7 @@ class DragonsDen:
             raise gcmd.error("Dragons Den: no tool attached; pass TOOL=n")
         self._require_homed(AXES)
         if tool != 0 and self.state.paper_ref_z is None:
-            raise gcmd.error("Dragons Den: run DRAGONS_PAPER_TEST TOOL=0"
+            raise gcmd.error("Dragons Den: run DD_PAPER_TEST TOOL=0"
                              " first (T0 is the Z reference)")
         if self.state.active_tool != tool:
             if not self._can_auto_change(tool):
@@ -1375,51 +1622,26 @@ class DragonsDen:
         self._lift(self.z_hop)
         self._end_wizard(msg)
 
-    def cmd_DRAGONS_SAVE_SETTINGS(self, gcmd):
+    def cmd_DD_SET_CONFIG(self, gcmd):
         """Write [dragons_den] options into dragonsnest.cfg. Klipper reads
-        config only at startup, so a RESTART is needed to apply them."""
+        config only at startup, so a RESTART is needed to apply them.
+        Values with spaces or "=" can be quoted: CAMERA_URL="/a?b=c"."""
         values = {}
-        for key, (kind, lo, above) in SETTINGS.items():
+        for key in SETTINGS:
             raw = gcmd.get(key.upper(), None)
             if raw is None:
                 continue
-            raw = raw.strip()
-            if kind == 'optfloat' and raw.lower() in ('', 'none'):
-                values[key] = None
-                continue
             try:
-                if kind == 'int':
-                    value = int(raw)
-                elif kind in ('float', 'optfloat'):
-                    value = float(raw)
-                else:
-                    value = raw.lower()
-                    if value not in kind:
-                        raise ValueError(raw)
-            except ValueError:
-                raise gcmd.error("Dragons Den: invalid %s '%s'" % (key, raw))
-            if kind == 'int' and not lo <= value <= MAX_TOOLS:
-                raise gcmd.error("Dragons Den: %s must be %d..%d"
-                                 % (key, lo, MAX_TOOLS))
-            if lo is not None and kind != 'int' and value < lo:
-                raise gcmd.error("Dragons Den: %s must be >= %s" % (key, lo))
-            if above is not None and value <= above:
-                raise gcmd.error("Dragons Den: %s must be > %s" % (key, above))
-            values[key] = value
+                values[key] = _parse_setting(key, raw.strip())
+            except ValueError as e:
+                raise gcmd.error("Dragons Den: %s" % (e,))
         if not values:
             raise gcmd.error("Dragons Den: no settings given")
         probe = values.get('probe_type', self.probe_type)
         ball_od = values.get('ball_od', self.ball_od)
-        if probe == 'sexball' and not ball_od > 0.:
+        if probe == 'sexball' and not (ball_od or 0.) > 0.:
             raise gcmd.error("Dragons Den: sexball needs ball_od > 0")
-        text = {}
-        for key, value in values.items():
-            if value is None:
-                text[key] = None
-            elif isinstance(value, float):
-                text[key] = ("%.4f" % value).rstrip('0').rstrip('.')
-            else:
-                text[key] = str(value)
+        text = {key: _format_setting(value) for key, value in values.items()}
         try:
             self.nest.update_settings('dragons_den', text)
         except (IOError, OSError) as e:
@@ -1431,17 +1653,84 @@ class DragonsDen:
                                    for k, v in sorted(text.items()))))
 
 
-# DRAGONS_SAVE_SETTINGS options: kind, minimum (inclusive), above (exclusive)
+# DD_SET_CONFIG options. "probe" names the probe_type the option belongs to
+# (the panel shows it only for that probe); "optional" options accept "none"
+# to comment them out so the default applies again.
 SETTINGS = {
-    'tool_count': ('int', 1, None),
-    'kinematics_type': (tuple(KINEMATICS_TYPES), None, None),
-    'probe_type': (tuple(PROBE_TYPES), None, None),
-    'dock_x_travel': ('float', None, None),
-    'lock_retract_dist': ('float', 0., None),
-    'clear_y_dist': ('float', None, 0.),
-    'ball_od': ('float', 0., None),
-    'front_dock_max_y': ('optfloat', None, None),
+    'tool_count': {'kind': 'int', 'min': 1, 'max': MAX_TOOLS},
+    'kinematics_type': {'kind': 'choice', 'choices': tuple(KINEMATICS_TYPES)},
+    'probe_type': {'kind': 'choice', 'choices': tuple(PROBE_TYPES)},
+    'dock_x_travel': {'kind': 'float'},
+    'lock_retract_dist': {'kind': 'float', 'min': 0.},
+    'clear_y_dist': {'kind': 'float', 'above': 0.},
+    'front_dock_max_y': {'kind': 'float', 'optional': True},
+    'probe_start_z': {'kind': 'float', 'above': 0.},
+    # sexball
+    'ball_od': {'kind': 'float', 'min': 0., 'probe': 'sexball'},
+    'ball_center': {'kind': 'floats', 'count': (2, 3), 'optional': True,
+                    'probe': 'sexball'},
+    'ball_clearance': {'kind': 'float', 'min': 0., 'probe': 'sexball'},
+    # eddy
+    'eddy_xy_target': {'kind': 'floats', 'count': (2,), 'optional': True,
+                       'probe': 'eddy'},
+    'eddy_z_point': {'kind': 'floats', 'count': (2,), 'optional': True,
+                     'probe': 'eddy'},
+    'eddy_probe_method': {'kind': 'str', 'optional': True, 'probe': 'eddy'},
+    # usb_camera
+    'camera_position': {'kind': 'floats', 'count': (3,), 'optional': True,
+                        'probe': 'usb_camera'},
+    'camera_url': {'kind': 'str', 'probe': 'usb_camera'},
+    'camera_circle_px': {'kind': 'int', 'min': 1, 'probe': 'usb_camera'},
 }
+
+
+def _parse_setting(key, raw):
+    spec = SETTINGS[key]
+    kind = spec['kind']
+    if spec.get('optional') and raw.lower() in ('', 'none'):
+        return None
+    try:
+        if kind == 'int':
+            value = int(raw)
+        elif kind == 'float':
+            value = float(raw)
+        elif kind == 'floats':
+            value = [float(p) for p in raw.split(',') if p.strip()]
+            if len(value) not in spec['count']:
+                raise ValueError(raw)
+        elif kind == 'choice':
+            value = raw.lower()
+            if value not in spec['choices']:
+                raise ValueError(raw)
+        else:
+            if not raw or '\n' in raw:
+                raise ValueError(raw)
+            value = raw
+    except ValueError:
+        expect = ""
+        if kind == 'floats':
+            expect = " (expected %s comma separated numbers)" % (
+                " or ".join(str(c) for c in spec['count']),)
+        elif kind == 'choice':
+            expect = " (one of %s)" % (", ".join(spec['choices']),)
+        raise ValueError("invalid %s '%s'%s" % (key, raw, expect))
+    if 'min' in spec and value < spec['min']:
+        raise ValueError("%s must be >= %s" % (key, spec['min']))
+    if 'max' in spec and value > spec['max']:
+        raise ValueError("%s must be <= %s" % (key, spec['max']))
+    if 'above' in spec and value <= spec['above']:
+        raise ValueError("%s must be > %s" % (key, spec['above']))
+    return value
+
+
+def _format_setting(value):
+    if value is None:
+        return None
+    if isinstance(value, float):
+        return ("%.4f" % value).rstrip('0').rstrip('.')
+    if isinstance(value, list):
+        return ", ".join(_format_setting(v) for v in value)
+    return str(value)
 
 
 def load_config(config):

@@ -1,9 +1,6 @@
-/* Dragons Den sidebar entry (added through .theme/navi.json) */
-a[href*="/server/dragons_den/panel"] .v-icon,
-a[href*="/server/dragons_den/panel"] svg {
-    color: #ff7043 !important;
-    fill: #ff7043 !important;
-}
+/* Dragons Den sidebar entry (added through .theme/navi.json). No colors of
+   its own: the nozzle icon and title follow Mainsail's theme like every
+   other sidebar item. */
 a[href*="/server/dragons_den/panel"] .v-list-item__title {
     font-weight: 500;
 }

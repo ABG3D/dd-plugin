@@ -32,33 +32,39 @@ def user_section(path):
 def test_status_exposes_settings(tmp_path):
     _, den = make(tmp_path, front_dock_max_y=40)
     s = den.get_status()['settings']
-    assert s == {'tool_count': 2, 'kinematics_type': 'fixed_gantry',
-                 'probe_type': 'usb_camera', 'dock_x_travel': -5.0,
-                 'lock_retract_dist': 3.0, 'clear_y_dist': 70.0,
-                 'ball_od': 0.0, 'front_dock_max_y': 40.0}
+    assert set(s) == set(dragons_den.SETTINGS)
+    assert {k: s[k] for k in ('tool_count', 'kinematics_type', 'probe_type',
+                              'dock_x_travel', 'lock_retract_dist',
+                              'clear_y_dist', 'ball_od', 'front_dock_max_y',
+                              'camera_url', 'eddy_xy_target')} == {
+        'tool_count': 2, 'kinematics_type': 'fixed_gantry',
+        'probe_type': 'usb_camera', 'dock_x_travel': -5.0,
+        'lock_retract_dist': 3.0, 'clear_y_dist': 70.0, 'ball_od': 0.0,
+        'front_dock_max_y': 40.0, 'camera_url': '/webcam/?action=stream',
+        'eddy_xy_target': None}
     assert den.get_status()['prompt'] is None
 
 
 def test_prompt_is_mirrored_in_status(tmp_path):
     printer, den = make(tmp_path)
     g = printer.gcode
-    g.run("DRAGONS_CALIBRATE_DOCKS")
+    g.run("DD_CALIBRATE_DOCKS")
     prompt = den.get_status()['prompt']
     assert prompt['title'] == "Dock calibration: T0 (1/2)"
     buttons = [b for it in prompt['items'] if it['type'] == 'buttons'
                for b in it['buttons']]
-    assert {'label': 'Accept', 'gcode': 'DRAGONS_RESPOND ACTION=accept',
+    assert {'label': 'Accept', 'gcode': 'DD_RESPOND ACTION=accept',
             'style': 'primary'} in buttons
-    assert any(b['gcode'] == 'DRAGONS_JOG X=1' for b in buttons)
+    assert any(b['gcode'] == 'DD_JOG X=1' for b in buttons)
     assert prompt['footer'] == [{'label': 'Cancel', 'style': 'error',
-                                 'gcode': 'DRAGONS_RESPOND ACTION=cancel'}]
+                                 'gcode': 'DD_RESPOND ACTION=cancel'}]
     json.dumps(den.get_status())          # Moonraker must serialize it
-    g.run("DRAGONS_RESPOND ACTION=cancel")
+    g.run("DD_RESPOND ACTION=cancel")
     assert den.get_status()['prompt'] is None
 
 
 ######################################################################
-# DRAGONS_SAVE_SETTINGS
+# DD_SET_CONFIG
 ######################################################################
 
 def test_save_settings_updates_dragonsnest(tmp_path):
@@ -66,8 +72,8 @@ def test_save_settings_updates_dragonsnest(tmp_path):
     shutil.copy(TEMPLATE, str(nest))
     printer, den = make(tmp_path)
     g = printer.gcode
-    g.run("DRAGONS_SET_ACTIVE_TOOL TOOL=1")        # creates the state block
-    g.run("DRAGONS_SAVE_SETTINGS TOOL_COUNT=4 KINEMATICS_TYPE=floating_gantry"
+    g.run("DD_SET_ACTIVE_TOOL TOOL=1")        # creates the state block
+    g.run("DD_SET_CONFIG TOOL_COUNT=4 KINEMATICS_TYPE=floating_gantry"
           " PROBE_TYPE=sexball BALL_OD=6.35 DOCK_X_TRAVEL=-4.5"
           " LOCK_RETRACT_DIST=2.5 CLEAR_Y_DIST=60 FRONT_DOCK_MAX_Y=40")
     section = user_section(nest)
@@ -87,13 +93,44 @@ def test_save_settings_updates_dragonsnest(tmp_path):
     # Running settings only change after a restart
     assert den.tool_count == 2
     # Clearing an optional value comments it out
-    g.run("DRAGONS_SAVE_SETTINGS FRONT_DOCK_MAX_Y=none")
+    g.run("DD_SET_CONFIG FRONT_DOCK_MAX_Y=none")
     assert 'front_dock_max_y' not in user_section(nest)
+
+
+def test_save_probe_specific_settings(tmp_path):
+    nest = tmp_path / "dragonsnest.cfg"
+    shutil.copy(TEMPLATE, str(nest))
+    printer, _ = make(tmp_path)
+    printer.gcode.run(
+        'DD_SET_CONFIG PROBE_TYPE=eddy EDDY_XY_TARGET=120,130.5'
+        ' EDDY_Z_POINT=150,150 EDDY_PROBE_METHOD=tap PROBE_START_Z=4'
+        ' CAMERA_URL="/webcam2/?action=stream" CAMERA_POSITION=150,20,10'
+        ' CAMERA_CIRCLE_PX=80 BALL_CENTER=none')
+    section = user_section(nest)
+    assert section['probe_type'] == 'eddy'
+    assert section['eddy_xy_target'] == '120, 130.5'
+    assert section['eddy_z_point'] == '150, 150'
+    assert section['eddy_probe_method'] == 'tap'
+    assert section['probe_start_z'] == '4'
+    assert section['camera_url'] == '/webcam2/?action=stream'
+    assert section['camera_position'] == '150, 20, 10'
+    assert section['camera_circle_px'] == '80'
+    assert 'ball_center' not in section
+
+
+def test_settings_probe_groups():
+    groups = {k: v.get('probe') for k, v in dragons_den.SETTINGS.items()}
+    assert {k for k, p in groups.items() if p == 'sexball'} == {
+        'ball_od', 'ball_center', 'ball_clearance'}
+    assert {k for k, p in groups.items() if p == 'eddy'} == {
+        'eddy_xy_target', 'eddy_z_point', 'eddy_probe_method'}
+    assert {k for k, p in groups.items() if p == 'usb_camera'} == {
+        'camera_position', 'camera_url', 'camera_circle_px'}
 
 
 def test_save_settings_adds_missing_section(tmp_path):
     printer, _ = make(tmp_path)
-    printer.gcode.run("DRAGONS_SAVE_SETTINGS TOOL_COUNT=3")
+    printer.gcode.run("DD_SET_CONFIG TOOL_COUNT=3")
     assert user_section(tmp_path / "dragonsnest.cfg")['tool_count'] == '3'
 
 
@@ -101,11 +138,13 @@ def test_save_settings_adds_missing_section(tmp_path):
     "TOOL_COUNT=0", "TOOL_COUNT=x", "KINEMATICS_TYPE=delta",
     "PROBE_TYPE=laser", "CLEAR_Y_DIST=0", "LOCK_RETRACT_DIST=-1",
     "PROBE_TYPE=sexball BALL_OD=0", "PROBE_TYPE=sexball", "",
+    "EDDY_XY_TARGET=1,2,3", "CAMERA_POSITION=1,2", "BALL_CENTER=a,b",
+    "CAMERA_CIRCLE_PX=0", "PROBE_START_Z=0",
 ])
 def test_save_settings_rejects_invalid(tmp_path, params):
     printer, _ = make(tmp_path)
     with pytest.raises(CommandError):
-        printer.gcode.run(("DRAGONS_SAVE_SETTINGS " + params).strip())
+        printer.gcode.run(("DD_SET_CONFIG " + params).strip())
     assert not (tmp_path / "dragonsnest.cfg").exists()
 
 
@@ -116,14 +155,14 @@ def test_save_settings_rejects_invalid(tmp_path, params):
 def test_single_tool_dock_calibration(tmp_path):
     printer, den = make(tmp_path, tool_count=3)
     g, th = printer.gcode, printer.toolhead
-    g.run("DRAGONS_CALIBRATE_DOCKS TOOL=1 SINGLE=1")
+    g.run("DD_CALIBRATE_DOCKS TOOL=1 SINGLE=1")
     assert den.get_status()['prompt']['title'] == \
         "Dock calibration: T1 (2/3)"
     th.hand_move(x=120., y=12.)
-    g.run("DRAGONS_RESPOND ACTION=accept")
-    g.run("DRAGONS_RESPOND ACTION=verify_no")
+    g.run("DD_RESPOND ACTION=accept")
+    g.run("DD_RESPOND ACTION=verify_no")
     assert any("Dock T1 is calibrated." in p for p in g.prompts())
-    g.run("DRAGONS_RESPOND ACTION=continue")
+    g.run("DD_RESPOND ACTION=continue")
     assert den._wizard is None                  # did not move on to T2
     assert sorted(den.state.docks) == [1]
 
@@ -134,7 +173,7 @@ def test_test_dock_slow_front_plus_y(tmp_path):
     g, th = printer.gcode, printer.toolhead
     g.run("T1")
     th.moves.clear()
-    g.run("DRAGONS_TEST_DOCK")
+    g.run("DD_TEST_DOCK")
     targets = [m[0] for m in th.moves]
     assert targets[0][2] == pytest.approx(th.get_position()[2])    # z hop
     assert [t[:2] for t in targets[1:]] == [
@@ -149,17 +188,17 @@ def test_test_dock_slow_front_plus_y(tmp_path):
                                  'Y_ADJUST': '0.500000',
                                  'Z_ADJUST': '-0.200000', 'MOVE': '0'}
     with pytest.raises(CommandError, match="no tool"):
-        g.run("DRAGONS_TEST_DOCK")
+        g.run("DD_TEST_DOCK")
 
 
 def test_test_dock_rejects_rear_dock(tmp_path):
     printer, den = make(tmp_path)
     den.state.docks = {0: [50., 290., None]}
     printer.gcode.run("G28")
-    printer.gcode.run("DRAGONS_SET_ACTIVE_TOOL TOOL=0")
+    printer.gcode.run("DD_SET_ACTIVE_TOOL TOOL=0")
     printer.toolhead.moves.clear()
     with pytest.raises(CommandError, match="front dock bar"):
-        printer.gcode.run("DRAGONS_TEST_DOCK")
+        printer.gcode.run("DD_TEST_DOCK")
     assert printer.toolhead.moves == []
 
 
@@ -173,8 +212,8 @@ def test_paper_test(tmp_path):
     setup_tools(printer, den)
     g, th = printer.gcode, printer.toolhead
     with pytest.raises(CommandError, match="TOOL=0 first"):
-        g.run("DRAGONS_PAPER_TEST TOOL=1")
-    g.run("DRAGONS_PAPER_TEST")                      # active tool: T0
+        g.run("DD_PAPER_TEST TOOL=1")
+    g.run("DD_PAPER_TEST")                      # active tool: T0
     assert th.get_position()[:3] == pytest.approx([100., 120., 5.])
     assert den.get_status()['wizard'] == 'paper'
     mp.finish([100., 120., 0.30])
@@ -182,7 +221,7 @@ def test_paper_test(tmp_path):
     assert reload_state(tmp_path).paper_ref_z == pytest.approx(0.30)
     assert den._wizard is None
     # T1: picked up automatically, moved to the same bed spot (XY offset)
-    g.run("DRAGONS_PAPER_TEST TOOL=1")
+    g.run("DD_PAPER_TEST TOOL=1")
     assert den.state.active_tool == 1
     assert th.get_position()[:3] == pytest.approx([101., 119.5, 5.2])
     mp.finish([101., 119.5, 0.75])
@@ -196,12 +235,12 @@ def test_paper_test_abort_and_errors(tmp_path):
     mp = make_module(dragons_den)
     g = printer.gcode
     with pytest.raises(CommandError, match="no tool attached"):
-        g.run("DRAGONS_PAPER_TEST")
-    g.run("DRAGONS_SET_ACTIVE_TOOL TOOL=0")
+        g.run("DD_PAPER_TEST")
+    g.run("DD_SET_ACTIVE_TOOL TOOL=0")
     with pytest.raises(CommandError, match="home"):
-        g.run("DRAGONS_PAPER_TEST")
+        g.run("DD_PAPER_TEST")
     g.run("G28")
-    g.run("DRAGONS_PAPER_TEST")
+    g.run("DD_PAPER_TEST")
     mp.finish(None)
     assert den._wizard is None
     assert den.state.paper_ref_z is None
@@ -357,14 +396,46 @@ def test_panel_page_has_all_controls():
     html = open(os.path.join(ROOT, "moonraker",
                              "dragons_den_panel.html")).read()
     for needle in [
-        "DRAGONS_SAVE_SETTINGS", "Save to dragonsnest.cfg",
+        "DD_SET_CONFIG", "Save to dragonsnest.cfg",
         'name="tool_count"', 'name="kinematics_type"',
         'name="dock_x_travel"', 'name="lock_retract_dist"',
         'name="clear_y_dist"', 'name="probe_type"', 'name="ball_od"',
-        "Calibrate All Docks", "SINGLE=1", "DRAGONS_TEST_DOCK",
-        "Calibrate Offsets", "DRAGONS_PAPER_TEST", "TESTZ Z=",
-        "DRAGONS_CAMERA_SAVE", "[0.01, 0.05, 0.1, 1.0]",
-        "DRAGONS_SELECT_TOOL TOOL=-1", "Dock Active Tool",
+        "Calibrate All Docks", "SINGLE=1", "DD_TEST_DOCK",
+        "Calibrate Offsets", "DD_PAPER_TEST", "TESTZ Z=",
+        "DD_CAMERA_SAVE", "[0.01, 0.05, 0.1, 1.0]",
+        "DD_SELECT_TOOL TOOL=-1", "Dock Active Tool",
         "/printer/objects/query?dragons_den", "href=\"/\"",
+        "tool-indicator", "sensor-badges", "Detached", "tool_state",
+        "mainsail&key=uiSettings", "--v-theme-primary", "v-card", "v-btn",
+        "/server/files/config/.theme/custom.css",
     ]:
         assert needle in html, needle
+    assert "DRAGONS_" not in html
+
+
+def test_panel_settings_match_module():
+    """Every DD_SET_CONFIG option has a field, inside the data-probe group
+    of the probe_type it belongs to (shown only for that probe)."""
+    import re
+    html = open(os.path.join(ROOT, "moonraker",
+                             "dragons_den_panel.html")).read()
+    form = html[html.index('<form id="settings"'):html.index('</form>')]
+    names = set(re.findall(r'name="([a-z_]+)"', form))
+    assert names == set(dragons_den.SETTINGS)
+    groups = {}
+    for probe, body in re.findall(
+            r'<div data-probe="([a-z_]+)">(.*?)\n        </div>', form, re.S):
+        groups[probe] = set(re.findall(r'name="([a-z_]+)"', body))
+    expected = {}
+    for key, spec in dragons_den.SETTINGS.items():
+        if spec.get('probe'):
+            expected.setdefault(spec['probe'], set()).add(key)
+    assert groups == expected
+    for probe in dragons_den.PROBE_TYPES:
+        assert 'data-probe-cal="%s"' % probe in html
+
+
+def test_theme_css_has_no_hardcoded_colors():
+    css = open(os.path.join(ROOT, "mainsail", "custom.css")).read()
+    import re
+    assert not re.search(r"#[0-9a-fA-F]{3,6}\b|rgb\(", css)

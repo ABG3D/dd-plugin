@@ -5,192 +5,288 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dragons Den</title>
 <style>
-  /* Colors follow Mainsail's dark theme */
-  :root { color-scheme: dark; --bg: #121212; --bar: #1e1e1e; --card: #1e1e1e; --card-head: #2a2a2b;
-          --line: #333; --text: #ffffffde; --muted: #ffffff99; --primary: #2196f3; --ok: #4caf50;
-          --warn: #fb8c00; --err: #ff5252; --info: #26a69a; }
+  /* Theme: no colors of our own. The --v-theme-* variables (Vuetify naming,
+     "r,g,b" triplets) are filled at runtime from Mainsail: from the parent
+     window when the panel is embedded, else from Mainsail's saved UI settings
+     (Moonraker database: mainsail/uiSettings -> mode + primary). The values
+     below are only the fallback until that has loaded: Vuetify's defaults,
+     as Mainsail uses them. The user's .theme/custom.css is loaded after this. */
+  :root {
+    --v-theme-background: 18,18,18; --v-theme-surface: 30,30,30; --v-theme-surface-variant: 42,42,43;
+    --v-theme-on-surface: 255,255,255; --v-theme-primary: 33,150,243; --v-theme-on-primary: 255,255,255;
+    --v-theme-secondary: 66,66,66; --v-theme-success: 76,175,80; --v-theme-info: 33,150,243;
+    --v-theme-warning: 251,140,0; --v-theme-error: 255,82,82; --v-border-opacity: .12;
+    --v-high-emphasis-opacity: .87; --v-medium-emphasis-opacity: .6;
+    color-scheme: dark;
+  }
+  :root[data-theme="light"] {
+    --v-theme-background: 245,245,245; --v-theme-surface: 255,255,255; --v-theme-surface-variant: 238,238,238;
+    --v-theme-on-surface: 0,0,0; --v-theme-secondary: 224,224,224; color-scheme: light;
+  }
   * { box-sizing: border-box; }
-  body { margin: 0; font: 14px/1.45 Roboto, system-ui, sans-serif; background: var(--bg); color: var(--text); }
-  a { color: var(--primary); }
-  header { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
-           padding: 10px 16px; background: var(--bar); border-bottom: 1px solid var(--line); }
-  header h1 { margin: 0; font-size: 18px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
-  header svg { width: 22px; height: 22px; fill: var(--primary); }
-  .back { text-decoration: none; padding: 4px 10px; border: 1px solid var(--line); border-radius: 4px; color: var(--text); }
+  body { margin: 0; font: 14px/1.45 Roboto, system-ui, sans-serif; background: rgb(var(--v-theme-background));
+         color: rgba(var(--v-theme-on-surface), var(--v-high-emphasis-opacity)); }
+  a { color: rgb(var(--v-theme-primary)); }
+  .dd-icon { width: 20px; height: 20px; fill: currentColor; flex: none; }
+  .v-app-bar { position: sticky; top: 0; z-index: 2; display: flex; flex-wrap: wrap; gap: 12px; align-items: center;
+               padding: 8px 16px; background: rgb(var(--v-theme-surface));
+               border-bottom: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity)); }
+  .v-app-bar h1 { margin: 0; font-size: 18px; font-weight: 500; display: flex; align-items: center; gap: 8px; }
+  .v-app-bar h1 .dd-icon { color: rgb(var(--v-theme-primary)); width: 24px; height: 24px; }
   .chips { display: flex; flex-wrap: wrap; gap: 6px; margin-left: auto; }
-  .chip { padding: 2px 10px; border-radius: 12px; background: #333; font-size: 12px; }
-  .chip.ok { background: #1b5e20; } .chip.bad { background: #7f1d1d; } .chip.busy { background: #0d47a1; }
+  .v-chip { display: inline-flex; align-items: center; gap: 4px; padding: 1px 10px; border-radius: 12px; font-size: 12px;
+            background: rgba(var(--v-theme-on-surface), .12); white-space: nowrap; }
+  .v-chip .dd-icon { width: 14px; height: 14px; }
+  .v-chip.text-success { background: rgba(var(--v-theme-success), .2); color: rgb(var(--v-theme-success)); }
+  .v-chip.text-error { background: rgba(var(--v-theme-error), .2); color: rgb(var(--v-theme-error)); }
+  .v-chip.text-warning { background: rgba(var(--v-theme-warning), .2); color: rgb(var(--v-theme-warning)); }
+  .v-chip.text-primary { background: rgba(var(--v-theme-primary), .2); color: rgb(var(--v-theme-primary)); }
   main { display: grid; gap: 16px; padding: 16px; grid-template-columns: repeat(auto-fill, minmax(420px, 1fr)); align-items: start; }
-  .card { background: var(--card); border-radius: 6px; overflow: hidden; box-shadow: 0 2px 4px #0006; }
-  .card > h2 { margin: 0; padding: 10px 14px; font-size: 15px; font-weight: 500; background: var(--card-head); }
-  .card > .body { padding: 12px 14px; }
-  .card.wide { grid-column: 1 / -1; }
-  .card.attention > h2 { background: #0d47a1; }
+  .v-card { background: rgb(var(--v-theme-surface)); border-radius: 4px; overflow: hidden;
+            box-shadow: 0 2px 1px -1px rgba(0,0,0,.2), 0 1px 1px 0 rgba(0,0,0,.14), 0 1px 3px 0 rgba(0,0,0,.12); }
+  .v-card-title { margin: 0; padding: 8px 14px; font-size: 15px; font-weight: 500; display: flex; align-items: center; gap: 8px;
+                  background: rgba(var(--v-theme-on-surface), .05);
+                  border-bottom: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity)); }
+  .v-card-title .dd-icon { color: rgb(var(--v-theme-primary)); }
+  .v-card-text { padding: 12px 14px; }
+  .v-card.wide { grid-column: 1 / -1; }
+  .v-card.attention { box-shadow: 0 0 0 2px rgb(var(--v-theme-primary)); }
   .row { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; margin: 8px 0; }
-  .hint { color: var(--muted); font-size: 12px; }
-  button { background: #333; color: var(--text); border: 0; border-radius: 4px; padding: 7px 12px;
-           font: inherit; font-weight: 500; letter-spacing: .02em; cursor: pointer; text-transform: uppercase; font-size: 12px; }
-  button:hover:not(:disabled) { filter: brightness(1.25); }
-  button:disabled { opacity: .45; cursor: default; }
-  button.primary { background: var(--primary); } button.ok { background: var(--ok); }
-  button.warning { background: var(--warn); } button.error { background: var(--err); }
-  button.info { background: var(--info); } button.secondary { background: #444; }
-  button.on { outline: 2px solid var(--primary); }
+  .hint { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-size: 12px; }
+  .v-btn { display: inline-flex; align-items: center; gap: 6px; border: 0; border-radius: 4px; padding: 7px 14px;
+           font: inherit; font-size: 12px; font-weight: 500; letter-spacing: .0892em; text-transform: uppercase; cursor: pointer;
+           text-decoration: none; background: rgb(var(--v-theme-secondary)); color: rgb(var(--v-theme-on-surface));
+           box-shadow: 0 3px 1px -2px rgba(0,0,0,.2), 0 2px 2px 0 rgba(0,0,0,.14), 0 1px 5px 0 rgba(0,0,0,.12); }
+  .v-btn .dd-icon { width: 16px; height: 16px; }
+  .v-btn:hover:not(:disabled) { filter: brightness(1.15); }
+  .v-btn:disabled { opacity: .4; cursor: default; box-shadow: none; }
+  .v-btn.v-btn--outlined { background: transparent; box-shadow: none;
+                           border: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity)); }
+  .v-btn.bg-primary { background: rgb(var(--v-theme-primary)); color: rgb(var(--v-theme-on-primary)); }
+  .v-btn.bg-success { background: rgb(var(--v-theme-success)); color: #fff; }
+  .v-btn.bg-info { background: rgb(var(--v-theme-info)); color: #fff; }
+  .v-btn.bg-warning { background: rgb(var(--v-theme-warning)); color: #fff; }
+  .v-btn.bg-error { background: rgb(var(--v-theme-error)); color: #fff; }
+  .v-btn.v-btn--active { box-shadow: 0 0 0 2px rgb(var(--v-theme-primary)); }
   table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
-  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid var(--line); }
-  th { color: var(--muted); font-weight: 500; }
-  label.field { display: grid; grid-template-columns: 150px 1fr; gap: 8px; align-items: center; margin: 6px 0; }
-  input, select { background: #2a2a2b; color: var(--text); border: 1px solid #444; border-radius: 4px; padding: 6px 8px; font: inherit; width: 100%; }
+  th, td { text-align: left; padding: 4px 6px; border-bottom: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity)); }
+  th { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); font-weight: 500; }
+  label.field { display: grid; grid-template-columns: 160px 1fr; gap: 8px; align-items: center; margin: 6px 0; }
+  .field-group { margin: 10px 0 4px; padding-top: 6px; border-top: 1px solid rgba(var(--v-theme-on-surface), var(--v-border-opacity)); }
+  input, select { background: rgba(var(--v-theme-on-surface), .06); color: inherit; border: 0; border-bottom: 1px solid
+                  rgba(var(--v-theme-on-surface), .42); border-radius: 4px 4px 0 0; padding: 6px 8px; font: inherit; width: 100%; }
+  input:focus, select:focus { outline: 0; border-bottom: 2px solid rgb(var(--v-theme-primary)); }
+  select option { background: rgb(var(--v-theme-surface)); }
   .view { position: relative; background: #000; border-radius: 4px; overflow: hidden; aspect-ratio: 4 / 3; }
   .view img, .view canvas { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
-  .pad { display: grid; grid-template-columns: repeat(3, 58px); gap: 6px; }
+  .pad { display: grid; grid-template-columns: repeat(3, 62px); gap: 6px; }
+  .pad .v-btn { justify-content: center; }
   .zcol { display: grid; gap: 6px; margin-left: 12px; }
   #prompt-items p { margin: 6px 0; }
-  #console { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; max-height: 220px; overflow: auto; color: var(--muted); }
-  #toast { position: fixed; bottom: 16px; right: 16px; max-width: 520px; padding: 10px 14px; border-radius: 4px;
-           background: var(--err); display: none; white-space: pre-wrap; z-index: 3; }
+  #console { font: 12px/1.4 ui-monospace, monospace; white-space: pre-wrap; max-height: 220px; overflow: auto;
+             color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
+  #toast { position: fixed; bottom: 16px; right: 16px; max-width: 520px; padding: 10px 14px; border-radius: 4px; color: #fff;
+           background: rgb(var(--v-theme-error)); display: none; white-space: pre-wrap; z-index: 3; }
   .hidden { display: none !important; }
-  .banner { background: #4a3000; border-left: 4px solid var(--warn); padding: 8px 10px; border-radius: 4px; }
+  .v-alert { padding: 8px 12px; border-radius: 4px; border-left: 4px solid rgb(var(--v-theme-warning));
+             background: rgba(var(--v-theme-warning), .12); }
+  .v-alert.error { border-left-color: rgb(var(--v-theme-error)); background: rgba(var(--v-theme-error), .12); margin-top: 10px; }
+  /* Live tool indicator */
+  .tool-indicator { display: flex; align-items: center; gap: 16px; }
+  .tool-indicator .big { font-size: 40px; font-weight: 500; line-height: 1; min-width: 96px; display: flex; align-items: center; gap: 8px; }
+  .tool-indicator .big .dd-icon { width: 36px; height: 36px; }
+  .tool-indicator.state-attached .big { color: rgb(var(--v-theme-success)); }
+  .tool-indicator.state-detached .big, .tool-indicator.state-unknown .big { color: rgb(var(--v-theme-error)); }
+  .tool-indicator.state-none .big { color: rgba(var(--v-theme-on-surface), var(--v-medium-emphasis-opacity)); }
 </style>
+<!-- The user's Mainsail theme overrides apply here too -->
+<link rel="stylesheet" href="/server/files/config/.theme/custom.css">
 </head>
 <body>
-<header>
-  <a class="back" href="/">&larr; Mainsail</a>
-  <h1><svg viewBox="0 0 24 24"><path d="M7,2H17V8H19V13H16.5L13,17H11L7.5,13H5V8H7V2M10,22H2V20H10A1,1 0 0,0 11,19V18H13V19A3,3 0 0,1 10,22Z"/></svg>Dragons Den</h1>
+<svg style="display:none"><symbol id="dd-nozzle" viewBox="0 0 24 24"><path d="M7,2H17V8H19V13H16.5L13,17H11L7.5,13H5V8H7V2M10,22H2V20H10A1,1 0 0,0 11,19V18H13V19A3,3 0 0,1 10,22Z"/></symbol></svg>
+<header class="v-app-bar">
+  <a class="v-btn v-btn--outlined" href="/">&larr; Mainsail</a>
+  <h1><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Dragons Den</h1>
   <div class="chips">
-    <span class="chip" id="chip-klippy">Klipper: ?</span>
-    <span class="chip" id="chip-tool">Tool: ?</span>
-    <span class="chip" id="chip-homed">Homed: ?</span>
-    <span class="chip hidden busy" id="chip-busy">Running…</span>
+    <span class="v-chip" id="chip-klippy">Klipper: ?</span>
+    <span class="v-chip" id="chip-tool"><svg class="dd-icon"><use href="#dd-nozzle"/></svg><span>Tool: ?</span></span>
+    <span class="v-chip" id="chip-homed">Homed: ?</span>
+    <span class="v-chip text-primary hidden" id="chip-busy">Running…</span>
   </div>
 </header>
 
 <main>
+  <!-- Live attached tool and sensor states -->
+  <section class="v-card wide" id="card-indicator">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Attached Tool</h2>
+    <div class="v-card-text">
+      <div class="tool-indicator state-none" id="tool-indicator">
+        <div class="big"><svg class="dd-icon"><use href="#dd-nozzle"/></svg><span id="tool-big">?</span></div>
+        <div>
+          <div id="tool-desc">Waiting for Klipper…</div>
+          <div class="row" id="sensor-badges"></div>
+        </div>
+      </div>
+      <div class="v-alert error hidden" id="detach-alert"></div>
+    </div>
+  </section>
+
   <!-- Wizard prompt mirror: shown while a Dragons Den wizard is waiting -->
-  <section class="card wide attention hidden" id="card-prompt">
-    <h2 id="prompt-title">Wizard</h2>
-    <div class="body">
+  <section class="v-card wide attention hidden" id="card-prompt">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg><span id="prompt-title">Wizard</span></h2>
+    <div class="v-card-text">
       <div id="prompt-items"></div>
       <div class="row" id="prompt-footer"></div>
     </div>
   </section>
 
   <!-- Klipper manual probe (paper test / sexball Z) -->
-  <section class="card wide attention hidden" id="card-probe">
-    <h2>Paper Z-Test (TESTZ)</h2>
-    <div class="body">
+  <section class="v-card wide attention hidden" id="card-probe">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Paper Z-Test (TESTZ)</h2>
+    <div class="v-card-text">
       <div class="row">Z = <b id="probe-z">?</b> <span class="hint" id="probe-range"></span></div>
       <div class="row" id="testz-down"></div>
       <div class="row" id="testz-up"></div>
       <div class="row">
-        <button class="ok" data-gcode="ACCEPT">Accept</button>
-        <button class="error" data-gcode="ABORT">Abort</button>
+        <button class="v-btn bg-success" data-gcode="ACCEPT">Accept</button>
+        <button class="v-btn bg-error" data-gcode="ABORT">Abort</button>
       </div>
       <div class="hint">Lower the nozzle until a sheet of paper just drags, then Accept.</div>
     </div>
   </section>
 
-  <section class="card" id="card-tools">
-    <h2>Tool Control &amp; Status</h2>
-    <div class="body">
-      <div class="banner hidden" id="restart-banner">
+  <section class="v-card" id="card-tools">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Tool Control &amp; Status</h2>
+    <div class="v-card-text">
+      <div class="v-alert hidden" id="restart-banner">
         Settings saved to dragonsnest.cfg. Restart Klipper to apply them.
-        <button class="warning" data-gcode="RESTART">Restart Klipper</button>
+        <button class="v-btn bg-warning" data-gcode="RESTART">Restart Klipper</button>
       </div>
       <div class="row" id="tool-buttons"></div>
       <div class="row">
-        <button class="secondary" data-gcode="DRAGONS_SELECT_TOOL TOOL=-1">Dock Active Tool</button>
-        <button class="secondary" data-gcode="G28">Home All</button>
-        <button class="secondary" data-gcode="DRAGONS_STATUS">Report Status</button>
+        <button class="v-btn" data-gcode="DD_SELECT_TOOL TOOL=-1"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Dock Active Tool</button>
+        <button class="v-btn" data-gcode="G28">Home All</button>
+        <button class="v-btn" data-gcode="DD_STATUS">Report Status</button>
       </div>
       <div class="row hint" id="position">Position: ?</div>
       <table>
-        <thead><tr><th>Tool</th><th>Dock X / Y / Z</th><th>Offset X / Y / Z</th></tr></thead>
+        <thead><tr><th>Tool</th><th>Dock sensor</th><th>Dock X / Y / Z</th><th>Offset X / Y / Z</th></tr></thead>
         <tbody id="tool-table"></tbody>
       </table>
       <div class="row">
         <span class="hint">Attached tool (no motion):</span>
         <select id="set-active" style="width:auto"></select>
-        <button class="secondary" id="set-active-btn">Set</button>
+        <button class="v-btn" id="set-active-btn">Set</button>
       </div>
     </div>
   </section>
 
-  <section class="card" id="card-docks">
-    <h2>Dock Calibration</h2>
-    <div class="body">
+  <section class="v-card" id="card-docks">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Dock Calibration</h2>
+    <div class="v-card-text">
       <div class="hint">Docks are on the front dock bar (low Y). The toolhead enters a dock moving &minus;Y and
         pulls out moving +Y by clear_y_dist. Rear dock positions are rejected.</div>
       <div class="row">
-        <button class="primary" data-gcode="DRAGONS_CALIBRATE_DOCKS">Calibrate All Docks</button>
-        <button class="warning" data-gcode="DRAGONS_TEST_DOCK">Test Slow Dock</button>
+        <button class="v-btn bg-primary" data-gcode="DD_CALIBRATE_DOCKS"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Calibrate All Docks</button>
+        <button class="v-btn bg-warning" data-gcode="DD_TEST_DOCK">Test Slow Dock</button>
       </div>
       <div class="row" id="dock-buttons"></div>
       <div class="hint" id="dock-limit"></div>
     </div>
   </section>
 
-  <section class="card" id="card-offsets">
-    <h2>Offset Calibration</h2>
-    <div class="body">
+  <section class="v-card" id="card-offsets">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Offset Calibration</h2>
+    <div class="v-card-text">
       <div class="row">
         <span class="hint">Probe: <b id="probe-type">?</b></span>
         <select id="offset-tool" style="width:auto"></select>
-        <button class="primary" id="cal-offsets">Calibrate Offsets</button>
-        <button class="info" id="paper-test">Paper Z-Test</button>
+        <button class="v-btn bg-primary" id="cal-offsets"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Calibrate Offsets</button>
+        <button class="v-btn bg-info" id="paper-test">Paper Z-Test</button>
       </div>
       <div class="hint">T0 is the reference (0,0,0); calibrate it first. Paper Z-Test measures Z only and keeps X/Y.</div>
-      <div class="view" style="margin-top:10px">
-        <img id="stream" alt="USB camera">
-        <canvas id="overlay"></canvas>
+      <!-- Only the section of the running probe_type is shown -->
+      <div data-probe-cal="sexball" class="hint" style="margin:8px 0">
+        Sexball: jog each nozzle over the calibration ball (OD <b id="cal-ball-od">?</b> mm), then lower it onto the ball
+        with TESTZ. The printer homes to measure X/Y.
       </div>
-      <div class="row"><span class="hint">Jog step (mm)</span><span id="steps"></span></div>
-      <div class="row">
-        <div class="pad">
-          <span></span><button data-jog="Y" data-dir="1">Y+</button><span></span>
-          <button data-jog="X" data-dir="-1">X−</button><span></span><button data-jog="X" data-dir="1">X+</button>
-          <span></span><button data-jog="Y" data-dir="-1">Y−</button><span></span>
-        </div>
-        <div class="zcol">
-          <button data-jog="Z" data-dir="1">Z+ away</button>
-          <button data-jog="Z" data-dir="-1">Z− closer</button>
-        </div>
+      <div data-probe-cal="eddy" class="hint" style="margin:8px 0">
+        Eddy: jog each nozzle over the XY target, then the eddy probe measures Z at the probe point
+        (<span id="cal-eddy-method">?</span>).
       </div>
-      <div class="row">
-        <span class="hint">Focus circle</span>
-        <input type="range" id="radius" min="5" max="300" value="60" style="width:200px">
-        <span class="hint" id="radius-val"></span>
-        <button class="ok" id="camera-save" disabled>Save</button>
+      <div data-probe-cal="usb_camera">
+        <div class="view" style="margin-top:10px">
+          <img id="stream" alt="USB camera">
+          <canvas id="overlay"></canvas>
+        </div>
+        <div class="row"><span class="hint">Jog step (mm)</span><span id="steps"></span></div>
+        <div class="row">
+          <div class="pad">
+            <span></span><button class="v-btn" data-jog="Y" data-dir="1">Y+</button><span></span>
+            <button class="v-btn" data-jog="X" data-dir="-1">X−</button><span></span><button class="v-btn" data-jog="X" data-dir="1">X+</button>
+            <span></span><button class="v-btn" data-jog="Y" data-dir="-1">Y−</button><span></span>
+          </div>
+          <div class="zcol">
+            <button class="v-btn" data-jog="Z" data-dir="1">Z+ away</button>
+            <button class="v-btn" data-jog="Z" data-dir="-1">Z− closer</button>
+          </div>
+        </div>
+        <div class="row">
+          <span class="hint">Focus circle</span>
+          <input type="range" id="radius" min="5" max="300" value="60" style="width:200px">
+          <span class="hint" id="radius-val"></span>
+          <button class="v-btn bg-success" id="camera-save" disabled>Save</button>
+        </div>
       </div>
     </div>
   </section>
 
-  <section class="card" id="card-settings">
-    <h2>Settings &amp; Persistence</h2>
-    <div class="body">
-      <form id="settings">
+  <section class="v-card" id="card-settings">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Settings &amp; Persistence</h2>
+    <div class="v-card-text">
+      <form id="settings" novalidate>
         <label class="field">tool_count <input name="tool_count" type="number" min="1" max="32" step="1"></label>
         <label class="field">kinematics_type
           <select name="kinematics_type"><option>fixed_gantry</option><option>floating_gantry</option></select></label>
-        <label class="field">dock_x_travel <input name="dock_x_travel" type="number" step="0.1"></label>
-        <label class="field">lock_retract_dist <input name="lock_retract_dist" type="number" step="0.1" min="0"></label>
-        <label class="field">clear_y_dist <input name="clear_y_dist" type="number" step="0.5" min="0.5"></label>
+        <label class="field">dock_x_travel <input name="dock_x_travel" type="number" step="any"></label>
+        <label class="field">lock_retract_dist <input name="lock_retract_dist" type="number" step="any" min="0"></label>
+        <label class="field">clear_y_dist <input name="clear_y_dist" type="number" step="any" min="0.5"></label>
+        <label class="field">front_dock_max_y <input name="front_dock_max_y" type="number" step="any" placeholder="middle of Y" data-optional></label>
+        <label class="field">probe_start_z <input name="probe_start_z" type="number" step="any" min="0.1"></label>
         <label class="field">probe_type
           <select name="probe_type"><option>eddy</option><option>sexball</option><option>usb_camera</option></select></label>
-        <label class="field">ball_od <input name="ball_od" type="number" step="0.01" min="0"></label>
-        <label class="field">front_dock_max_y <input name="front_dock_max_y" type="number" step="0.5" placeholder="middle of Y"></label>
-        <div class="row">
-          <button class="primary" type="submit">Save to dragonsnest.cfg</button>
-          <button class="secondary" type="button" id="settings-reset">Revert</button>
+        <!-- Probe specific: only the selected probe_type's fields are shown and saved -->
+        <div data-probe="sexball">
+          <div class="field-group hint">sexball</div>
+          <label class="field">ball_od <input name="ball_od" type="number" step="any" min="0"></label>
+          <label class="field">ball_center <input name="ball_center" placeholder="x, y  or  x, y, z" data-optional></label>
+          <label class="field">ball_clearance <input name="ball_clearance" type="number" step="any" min="0"></label>
         </div>
+        <div data-probe="eddy">
+          <div class="field-group hint">eddy</div>
+          <label class="field">eddy_xy_target <input name="eddy_xy_target" placeholder="x, y" data-optional></label>
+          <label class="field">eddy_z_point <input name="eddy_z_point" placeholder="x, y" data-optional></label>
+          <label class="field">eddy_probe_method <input name="eddy_probe_method" placeholder="tap" data-optional data-text></label>
+        </div>
+        <div data-probe="usb_camera">
+          <div class="field-group hint">usb_camera</div>
+          <label class="field">camera_position <input name="camera_position" placeholder="x, y, z" data-optional></label>
+          <label class="field">camera_url <input name="camera_url" data-text></label>
+          <label class="field">camera_circle_px <input name="camera_circle_px" type="number" step="1" min="1"></label>
+        </div>
+        <div class="row">
+          <button class="v-btn bg-primary" type="submit">Save to dragonsnest.cfg</button>
+          <button class="v-btn" type="button" id="settings-reset">Revert</button>
+        </div>
+        <div class="hint">Sensor pins (toolhead_sensor_pin, dock_sensor_pin_t0…) are edited in dragonsnest.cfg.</div>
         <div class="hint" id="nest-file"></div>
       </form>
     </div>
   </section>
 
-  <section class="card wide">
-    <h2>Console</h2>
-    <div class="body"><div id="console"></div></div>
+  <section class="v-card wide">
+    <h2 class="v-card-title"><svg class="dd-icon"><use href="#dd-nozzle"/></svg>Console</h2>
+    <div class="v-card-text"><div id="console"></div></div>
   </section>
 </main>
 <div id="toast"></div>
@@ -200,8 +296,8 @@
   'use strict';
   const STEPS = [0.01, 0.05, 0.1, 1.0];
   const TESTZ = [-1, -0.1, -0.05, -0.01];
-  const SETTINGS = ['tool_count', 'kinematics_type', 'dock_x_travel', 'lock_retract_dist',
-                    'clear_y_dist', 'probe_type', 'ball_od', 'front_dock_max_y'];
+  const STYLE = { primary: 'bg-primary', secondary: '', info: 'bg-info', warning: 'bg-warning',
+                  error: 'bg-error', success: 'bg-success' };
   const $ = (id) => document.getElementById(id);
   let st = null, busy = 0, jogStep = 0.1, settingsDirty = false, streamSet = false, lastPrompt = '';
 
@@ -213,9 +309,55 @@
     (children || []).forEach(c => e.appendChild(typeof c === 'string' ? document.createTextNode(c) : c));
     return e;
   }
+  function nozzle() {
+    const s = document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+    s.setAttribute('class', 'dd-icon');
+    const u = document.createElementNS('http://www.w3.org/2000/svg', 'use');
+    u.setAttribute('href', '#dd-nozzle'); s.appendChild(u);
+    return s;
+  }
+  function btn(label, style, gcode, icon) {
+    const b = el('button', { className: ('v-btn ' + (STYLE[style] || '')).trim(), dataset: gcode ? { gcode } : {} });
+    if (icon) b.appendChild(nozzle());
+    b.appendChild(document.createTextNode(label));
+    return b;
+  }
   function toast(msg) {
     const t = $('toast'); t.textContent = msg; t.style.display = 'block';
     clearTimeout(toast.timer); toast.timer = setTimeout(() => { t.style.display = 'none'; }, 8000);
+  }
+
+  // ---- Theme: follow Mainsail ----
+  function hexToRgb(hex) {
+    const m = /^#?([0-9a-f]{2})([0-9a-f]{2})([0-9a-f]{2})/i.exec(String(hex || '').trim());
+    return m ? [1, 2, 3].map(i => parseInt(m[i], 16)).join(',') : null;
+  }
+  function onColor(rgb) {
+    const [r, g, b] = rgb.split(',').map(Number);
+    return (0.299 * r + 0.587 * g + 0.114 * b) > 160 ? '0,0,0' : '255,255,255';
+  }
+  function applyTheme(mode, primary) {
+    const root = document.documentElement;
+    if (mode) root.dataset.theme = mode === 'light' ? 'light' : 'dark';
+    const rgb = hexToRgb(primary);
+    if (rgb) { root.style.setProperty('--v-theme-primary', rgb); root.style.setProperty('--v-theme-on-primary', onColor(rgb)); }
+  }
+  async function loadTheme() {
+    // 1. Embedded in Mainsail (same origin): copy Vuetify's live variables
+    try {
+      if (window.parent !== window) {
+        const pd = window.parent.document, cs = window.parent.getComputedStyle(pd.documentElement);
+        const primary = cs.getPropertyValue('--v-primary-base');
+        const dark = !!pd.querySelector('.theme--dark');
+        if (primary) { applyTheme(dark ? 'dark' : 'light', primary); return; }
+      }
+    } catch (e) {}
+    // 2. Mainsail's saved UI settings in the Moonraker database
+    try {
+      const r = await api('/server/database/item?namespace=mainsail&key=uiSettings');
+      const ui = (r && r.value) || {};
+      applyTheme(ui.mode, ui.primary);
+    } catch (e) {}
   }
 
   // ---- Moonraker API ----
@@ -253,7 +395,7 @@
       render();
     } catch (e) {
       $('chip-klippy').textContent = 'Klipper: ' + e.message;
-      $('chip-klippy').className = 'chip bad';
+      $('chip-klippy').className = 'v-chip text-error';
     }
   }
   async function pollConsole() {
@@ -268,20 +410,50 @@
   }
 
   function fmt(v) { return v === null || v === undefined ? '–' : Number(v).toFixed(3); }
+  function sensorText(v) { return v === null || v === undefined ? 'n/a' : (v ? 'seated' : 'empty'); }
+  function sensorClass(v) { return 'v-chip' + (v === null || v === undefined ? '' : (v ? ' text-success' : ' text-warning')); }
+
+  function renderIndicator(dd) {
+    const state = dd.tool_state || (dd.active_tool >= 0 ? 'attached' : 'none');
+    const active = dd.active_tool, sensors = dd.sensors || { toolhead: null, docks: {} };
+    const big = { attached: 'T' + active, none: 'None', detached: 'Detached', unknown: 'Error' }[state] || '?';
+    $('tool-indicator').className = 'tool-indicator state-' + state;
+    $('tool-big').textContent = big;
+    const desc = {
+      attached: 'T' + active + ' is attached to the toolhead.',
+      none: 'No tool is attached.',
+      detached: 'T' + active + ' detached from the toolhead unexpectedly.',
+      unknown: 'The sensors disagree with the active tool (' + (active >= 0 ? 'T' + active : 'none') + ').',
+    }[state] || '';
+    $('tool-desc').textContent = desc + (sensors.toolhead === null ? ' No toolhead sensor configured.' : '');
+    const badges = $('sensor-badges'); badges.innerHTML = '';
+    badges.appendChild(el('span', { className: sensorClass(sensors.toolhead), textContent: 'Toolhead: ' + sensorText(sensors.toolhead) }));
+    for (let i = 0; i < dd.tool_count; i++) {
+      const v = (sensors.docks || {})['T' + i];
+      badges.appendChild(el('span', { className: sensorClass(v), textContent: 'T' + i + ' dock: ' + sensorText(v) }));
+    }
+    const alert = $('detach-alert');
+    alert.classList.toggle('hidden', state !== 'detached' && state !== 'unknown');
+    alert.textContent = state === 'detached'
+      ? 'T' + active + ' fell off or was pulled off during a print. Re-attach it by hand (it is detected automatically), check the print, then RESUME.'
+      : 'A hotend is seated but the dock sensors do not identify it, or they contradict the active tool. Check the tools, or set the attached tool below.';
+  }
 
   function render() {
     const dd = st.dragons_den, th = st.toolhead, wh = st.webhooks || {};
     const ready = wh.state === 'ready';
     $('chip-klippy').textContent = 'Klipper: ' + (wh.state || '?');
-    $('chip-klippy').className = 'chip ' + (ready ? 'ok' : 'bad');
+    $('chip-klippy').className = 'v-chip ' + (ready ? 'text-success' : 'text-error');
     if (!dd || !Object.keys(dd).length) {
-      $('chip-tool').textContent = 'dragons_den not loaded';
+      $('chip-tool').lastChild.textContent = 'dragons_den not loaded';
       return;
     }
-    const n = dd.tool_count, active = dd.active_tool;
-    $('chip-tool').textContent = 'Tool: ' + (active >= 0 ? 'T' + active : 'none');
+    const n = dd.tool_count, active = dd.active_tool, state = dd.tool_state || 'none';
+    $('chip-tool').lastChild.textContent = 'Tool: ' + (state === 'detached' ? 'Detached' : state === 'unknown' ? 'Error'
+                                                       : active >= 0 ? 'T' + active : 'None');
+    $('chip-tool').className = 'v-chip ' + (state === 'detached' || state === 'unknown' ? 'text-error' : active >= 0 ? 'text-success' : '');
     $('chip-homed').textContent = 'Homed: ' + (th.homed_axes || 'no');
-    $('chip-homed').className = 'chip ' + (th.homed_axes === 'xyz' ? 'ok' : '');
+    $('chip-homed').className = 'v-chip ' + (th.homed_axes === 'xyz' ? 'text-success' : '');
     const p = th.position || [];
     $('position').textContent = 'Position: X ' + fmt(p[0]) + '  Y ' + fmt(p[1]) + '  Z ' + fmt(p[2]);
     $('restart-banner').classList.toggle('hidden', !dd.restart_pending);
@@ -291,19 +463,24 @@
     $('dock-limit').textContent = 'Front-dock limit: dock Y ' +
       (s.front_dock_max_y === null || s.front_dock_max_y === undefined ? '< middle of Y travel' : '≤ ' + s.front_dock_max_y) +
       ' · clearance +' + s.clear_y_dist + ' mm';
+    renderIndicator(dd);
+
+    // Calibration controls of the running probe_type only
+    document.querySelectorAll('[data-probe-cal]').forEach(e => e.classList.toggle('hidden', e.dataset.probeCal !== dd.probe_type));
+    $('cal-ball-od').textContent = s.ball_od;
+    $('cal-eddy-method').textContent = s.eddy_probe_method ? 'PROBE METHOD=' + s.eddy_probe_method : 'PROBE';
 
     // Tool buttons, tables and selectors (rebuilt when the tool count/active tool changes)
     const key = n + ':' + active;
     if (render.toolKey !== key) {
       render.toolKey = key;
       const tb = $('tool-buttons'); tb.innerHTML = '';
-      for (let i = 0; i < n; i++)
-        tb.appendChild(el('button', { className: i === active ? 'primary' : 'secondary', textContent: 'T' + i,
-                                       title: 'Change to T' + i, dataset: { gcode: 'T' + i } }));
+      for (let i = 0; i < n; i++) {
+        const b = btn('T' + i, i === active ? 'primary' : 'secondary', 'T' + i, true);
+        b.title = 'Change to T' + i; tb.appendChild(b);
+      }
       const db = $('dock-buttons'); db.innerHTML = '';
-      for (let i = 0; i < n; i++)
-        db.appendChild(el('button', { className: 'secondary', textContent: 'Calibrate T' + i,
-                                       dataset: { gcode: 'DRAGONS_CALIBRATE_DOCKS TOOL=' + i + ' SINGLE=1' } }));
+      for (let i = 0; i < n; i++) db.appendChild(btn('Calibrate T' + i, 'secondary', 'DD_CALIBRATE_DOCKS TOOL=' + i + ' SINGLE=1'));
       for (const id of ['set-active', 'offset-tool']) {
         const sel = $(id), prev = sel.value; sel.innerHTML = '';
         if (id === 'set-active') sel.add(new Option('none', -1));
@@ -312,10 +489,12 @@
       }
     }
     const tbody = $('tool-table'); tbody.innerHTML = '';
+    const docks = (dd.sensors || {}).docks || {};
     for (let i = 0; i < n; i++) {
-      const d = dd.docks['T' + i], o = dd.offsets['T' + i];
+      const d = dd.docks['T' + i], o = dd.offsets['T' + i], v = docks['T' + i];
       tbody.appendChild(el('tr', {}, [
         el('td', { textContent: 'T' + i + (i === active ? ' ●' : '') }),
+        el('td', {}, [el('span', { className: sensorClass(v), textContent: sensorText(v) })]),
         el('td', { textContent: d ? fmt(d.x) + ' / ' + fmt(d.y) + ' / ' + fmt(d.z) : 'not calibrated' }),
         el('td', { textContent: i === 0 ? 'reference' : (o ? fmt(o.x) + ' / ' + fmt(o.y) + ' / ' + fmt(o.z) : 'not calibrated') }),
       ]));
@@ -326,7 +505,7 @@
     $('camera-save').disabled = !(dd.wizard === 'offsets' && dd.wizard_step === 'camera');
     $('camera-save').textContent = dd.wizard_tool >= 0 ? 'Save T' + dd.wizard_tool : 'Save';
 
-    if (!streamSet) {
+    if (!streamSet && dd.probe_type === 'usb_camera') {
       $('stream').src = dd.camera_url;
       $('radius').value = dd.camera_circle_px;
       streamSet = true;
@@ -346,12 +525,10 @@
     const items = $('prompt-items'); items.innerHTML = '';
     for (const it of prompt.items) {
       if (it.type === 'text') items.appendChild(el('p', { textContent: it.text }));
-      else items.appendChild(el('div', { className: 'row' }, it.buttons.map(b =>
-        el('button', { className: b.style, textContent: b.label, dataset: { gcode: b.gcode } }))));
+      else items.appendChild(el('div', { className: 'row' }, it.buttons.map(b => btn(b.label, b.style, b.gcode))));
     }
     const footer = $('prompt-footer'); footer.innerHTML = '';
-    prompt.footer.forEach(b => footer.appendChild(
-      el('button', { className: b.style, textContent: b.label, dataset: { gcode: b.gcode } })));
+    prompt.footer.forEach(b => footer.appendChild(btn(b.label, b.style, b.gcode)));
   }
 
   function renderProbe(mp) {
@@ -362,47 +539,64 @@
       ? '(between ' + fmt(mp.z_position_lower) + ' and ' + fmt(mp.z_position_upper) + ')' : '';
   }
 
-  function fillSettings(s) {
-    const f = $('settings');
-    for (const k of SETTINGS) {
-      const v = s[k];
-      f.elements[k].value = v === null || v === undefined ? '' : v;
-    }
-  }
-
   // ---- Settings form ----
-  $('settings').addEventListener('input', () => { settingsDirty = true; });
+  const form = $('settings');
+  function fields() { return Array.from(form.querySelectorAll('input[name], select[name]')); }
+  function probeGroup(input) { const g = input.closest('[data-probe]'); return g ? g.dataset.probe : null; }
+  function showProbeFields() {
+    const probe = form.elements.probe_type.value;
+    form.querySelectorAll('[data-probe]').forEach(g => g.classList.toggle('hidden', g.dataset.probe !== probe));
+  }
+  function fillSettings(s) {
+    for (const f of fields()) {
+      const v = s[f.name];
+      f.value = v === null || v === undefined ? '' : (Array.isArray(v) ? v.join(', ') : v);
+    }
+    showProbeFields();
+  }
+  form.addEventListener('input', () => { settingsDirty = true; });
+  form.elements.probe_type.addEventListener('change', showProbeFields);
   $('settings-reset').onclick = () => { settingsDirty = false; if (st) fillSettings(st.dragons_den.settings); };
-  $('settings').addEventListener('submit', (ev) => {
+  form.addEventListener('submit', (ev) => {
     ev.preventDefault();
-    const f = ev.target, parts = ['DRAGONS_SAVE_SETTINGS'];
-    for (const k of SETTINGS) {
-      const v = String(f.elements[k].value).trim();
-      if (v === '' && k !== 'front_dock_max_y') continue;
-      parts.push(k.toUpperCase() + '=' + (v === '' ? 'none' : v));
+    const probe = form.elements.probe_type.value, parts = ['DD_SET_CONFIG'];
+    for (const f of fields()) {
+      const group = probeGroup(f);
+      if (group && group !== probe) continue;          // other probes' fields are not saved
+      let v = String(f.value).trim();
+      if (v === '') {
+        if (!('optional' in f.dataset)) continue;
+        v = 'none';
+      } else if ('text' in f.dataset) {
+        v = '"' + v.replace(/["\\]/g, '') + '"';
+      } else {
+        v = v.replace(/\s+/g, '');                     // "150, 150" -> "150,150"
+      }
+      parts.push(f.name.toUpperCase() + '=' + v);
     }
     settingsDirty = false;
     gcode(parts.join(' '));
   });
 
   // ---- Tool / offsets controls ----
-  $('set-active-btn').onclick = () => gcode('DRAGONS_SET_ACTIVE_TOOL TOOL=' + $('set-active').value);
-  $('cal-offsets').onclick = () => gcode('DRAGONS_CALIBRATE_OFFSETS TOOL=' + $('offset-tool').value);
-  $('paper-test').onclick = () => gcode('DRAGONS_PAPER_TEST TOOL=' + $('offset-tool').value);
-  $('camera-save').onclick = () => gcode('DRAGONS_CAMERA_SAVE');
+  $('set-active-btn').onclick = () => gcode('DD_SET_ACTIVE_TOOL TOOL=' + $('set-active').value);
+  $('cal-offsets').onclick = () => gcode('DD_CALIBRATE_OFFSETS TOOL=' + $('offset-tool').value);
+  $('paper-test').onclick = () => gcode('DD_PAPER_TEST TOOL=' + $('offset-tool').value);
+  $('camera-save').onclick = () => gcode('DD_CAMERA_SAVE');
 
   // TESTZ buttons
-  for (const d of TESTZ) $('testz-down').appendChild(el('button', { className: 'secondary', textContent: String(d), dataset: { gcode: 'TESTZ Z=' + d } }));
-  for (const d of TESTZ.slice().reverse()) $('testz-up').appendChild(el('button', { className: 'secondary', textContent: '+' + (-d), dataset: { gcode: 'TESTZ Z=' + (-d) } }));
+  for (const d of TESTZ) $('testz-down').appendChild(btn(String(d), 'secondary', 'TESTZ Z=' + d));
+  for (const d of TESTZ.slice().reverse()) $('testz-up').appendChild(btn('+' + (-d), 'secondary', 'TESTZ Z=' + (-d)));
 
   // ---- Camera view ----
   for (const s of STEPS) {
-    const b = el('button', { className: s === jogStep ? 'secondary on' : 'secondary', textContent: String(s) });
-    b.onclick = () => { jogStep = s; document.querySelectorAll('#steps button').forEach(x => x.classList.toggle('on', x === b)); };
+    const b = btn(String(s), 'secondary');
+    if (s === jogStep) b.classList.add('v-btn--active');
+    b.onclick = () => { jogStep = s; document.querySelectorAll('#steps .v-btn').forEach(x => x.classList.toggle('v-btn--active', x === b)); };
     $('steps').appendChild(b);
   }
   document.querySelectorAll('[data-jog]').forEach(b => {
-    b.onclick = () => gcode('DRAGONS_JOG ' + b.dataset.jog + '=' + (Number(b.dataset.dir) * jogStep));
+    b.onclick = () => gcode('DD_JOG ' + b.dataset.jog + '=' + (Number(b.dataset.dir) * jogStep));
   });
   function draw() {
     const c = $('overlay'), img = $('stream');
@@ -415,16 +609,19 @@
     const r = Number($('radius').value) * scale;
     $('radius-val').textContent = $('radius').value + ' px';
     const cx = w / 2, cy = h / 2;
+    const css = getComputedStyle(document.documentElement);
     ctx.clearRect(0, 0, w, h);
-    ctx.strokeStyle = '#ff5252'; ctx.lineWidth = 1.5;
+    ctx.strokeStyle = 'rgb(' + css.getPropertyValue('--v-theme-error') + ')'; ctx.lineWidth = 1.5;
     ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(w, cy); ctx.moveTo(cx, 0); ctx.lineTo(cx, h); ctx.stroke();
-    ctx.strokeStyle = '#4caf50'; ctx.lineWidth = 2;
+    ctx.strokeStyle = 'rgb(' + css.getPropertyValue('--v-theme-success') + ')'; ctx.lineWidth = 2;
     ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI * 2); ctx.stroke();
     ctx.beginPath(); ctx.arc(cx, cy, 3, 0, Math.PI * 2); ctx.stroke();
   }
   $('radius').oninput = draw;
   window.addEventListener('resize', draw);
 
+  showProbeFields();
+  loadTheme();
   poll(); pollConsole();
   setInterval(poll, 1000);
   setInterval(pollConsole, 2000);

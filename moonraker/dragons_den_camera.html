@@ -168,10 +168,10 @@
     $('steps').appendChild(b);
   }
   document.querySelectorAll('[data-jog]').forEach(b => {
-    b.onclick = () => run('DRAGONS_JOG ' + b.dataset.jog + '=' + (Number(b.dataset.dir) * step));
+    b.onclick = () => run('DD_JOG ' + b.dataset.jog + '=' + (Number(b.dataset.dir) * step));
   });
-  $('calibrate').onclick = () => run('DRAGONS_CALIBRATE_OFFSETS TOOL=' + $('tool').value);
-  $('save').onclick = () => run('DRAGONS_CAMERA_SAVE');
+  $('calibrate').onclick = () => run('DD_CALIBRATE_OFFSETS TOOL=' + $('tool').value);
+  $('save').onclick = () => run('DD_CAMERA_SAVE');
   $('radius').oninput = draw;
   $('stream').onload = draw;
   window.addEventListener('resize', draw);
